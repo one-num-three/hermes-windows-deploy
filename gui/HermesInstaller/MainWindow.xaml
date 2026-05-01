@@ -1,0 +1,71 @@
+<Window x:Class="HermesInstaller.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:steps="clr-namespace:HermesInstaller.Steps"
+        Title="Hermes Agent 安装向导"
+        Width="620" Height="520"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent">
+
+    <Border Background="#FFFFFF" CornerRadius="12" BorderBrush="#E0E0E0" BorderThickness="1">
+        <Grid Margin="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- 标题栏 -->
+            <Border Grid.Row="0" Background="#1A1A2E" CornerRadius="12,12,0,0" Height="48"
+                    MouseLeftButtonDown="TitleBar_MouseDown">
+                <Grid Margin="16,0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="⚡" FontSize="20" Margin="0,0,8,0"/>
+                        <TextBlock Text="Hermes Agent 安装向导" Foreground="White" FontSize="16"
+                                   FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button Content="✕" Click="CloseButton_Click"
+                            Style="{StaticResource TitleBarButton}"
+                            HorizontalAlignment="Right" Width="32" Height="32"/>
+                </Grid>
+            </Border>
+
+            <!-- 内容区 -->
+            <Grid Grid.Row="1" Margin="32,24,32,16">
+                <!-- 欢迎页 -->
+                <steps:WelcomeStep x:Name="WelcomePage" Visibility="Visible"/>
+
+                <!-- 检测页 -->
+                <steps:CheckStep x:Name="CheckPage" Visibility="Collapsed"/>
+
+                <!-- 安装页（进度） -->
+                <steps:InstallStep x:Name="InstallPage" Visibility="Collapsed"/>
+
+                <!-- 完成页 -->
+                <steps:FinishStep x:Name="FinishPage" Visibility="Collapsed"/>
+            </Grid>
+
+            <!-- 底部按钮 -->
+            <Border Grid.Row="2" Background="#F5F5F5" CornerRadius="0,0,12,12" Padding="24,16">
+                <Grid>
+                    <Button x:Name="BackButton" Content="← 上一步"
+                            Click="BackButton_Click" Visibility="Collapsed"
+                            Style="{StaticResource SecondaryButton}"
+                            HorizontalAlignment="Left"/>
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="NextButton" Content="下一步 →"
+                                Click="NextButton_Click"
+                                Style="{StaticResource PrimaryButton}"/>
+                        <Button x:Name="CancelButton" Content="取消"
+                                Click="CancelButton_Click" Margin="8,0,0,0"
+                                Style="{StaticResource SecondaryButton}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

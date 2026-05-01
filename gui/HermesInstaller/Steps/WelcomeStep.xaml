@@ -1,0 +1,51 @@
+<UserControl x:Class="HermesInstaller.Steps.WelcomeStep"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel VerticalAlignment="Center">
+        <!-- 图标 -->
+        <TextBlock Text="⚡" FontSize="56" HorizontalAlignment="Center" Margin="0,0,0,16"/>
+
+        <!-- 标题 -->
+        <TextBlock Text="欢迎使用 Hermes Agent"
+                   FontSize="24" FontWeight="Bold"
+                   HorizontalAlignment="Center" Margin="0,0,0,8"/>
+
+        <TextBlock Text="AI Agent 框架 · 一键部署到 Windows"
+                   FontSize="14" Foreground="#666666"
+                   HorizontalAlignment="Center" Margin="0,0,0,24"/>
+
+        <!-- 说明卡片 -->
+        <Border Background="#F8F9FA" CornerRadius="8" Padding="20" Margin="0,0,0,20">
+            <StackPanel>
+                <TextBlock Text="安装程序将自动完成：" FontWeight="SemiBold" Margin="0,0,0,12"/>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="⊞" FontSize="16" Grid.Column="0" Margin="0,2,12,0"/>
+                    <TextBlock Text="启用 WSL2（Windows 子系统 Linux）" Grid.Column="1" Margin="0,0,0,6"/>
+
+                    <TextBlock Text="🐧" FontSize="16" Grid.Column="0" Margin="0,8,12,0" Grid.Row="1"/>
+                    <TextBlock Text="安装 Ubuntu 24.04 LTS" Grid.Column="1" Margin="0,8,0,6" Grid.Row="1"/>
+
+                    <TextBlock Text="🤖" FontSize="16" Grid.Column="0" Margin="0,8,12,0" Grid.Row="2"/>
+                    <TextBlock Text="部署 Hermes Agent + Web UI 面板" Grid.Column="1" Margin="0,8,0,6" Grid.Row="2"/>
+
+                    <TextBlock Text="🔁" FontSize="16" Grid.Column="0" Margin="0,8,12,0" Grid.Row="3"/>
+                    <TextBlock Text="配置开机自启，重启后自动运行" Grid.Column="1" Margin="0,8,0,0" Grid.Row="3"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <!-- 系统要求 -->
+        <TextBlock Text="系统要求：Windows 10/11 · 8GB 内存 · 20GB 磁盘 · 虚拟化已启用"
+                   FontSize="12" Foreground="#999999" HorizontalAlignment="Center"/>
+
+        <CheckBox x:Name="AgreeCheck" Content="我已知晓需要重启电脑一次（启用 WSL2）"
+                  Margin="0,20,0,0" HorizontalAlignment="Center"
+                  Checked="AgreeCheck_Changed" Unchecked="AgreeCheck_Changed"/>
+    </StackPanel>
+</UserControl>

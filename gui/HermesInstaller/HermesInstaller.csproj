@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>HermesInstaller</AssemblyName>
+    <RootNamespace>HermesInstaller</RootNamespace>
+    <ApplicationIcon>..\installer\assets\icon.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <Authors>Hermes Community</Authors>
+    <Description>Hermes Agent Windows 一键安装向导</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.77" />
+  </ItemGroup>
+
+</Project>

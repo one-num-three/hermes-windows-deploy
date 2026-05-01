@@ -1,0 +1,24 @@
+# Inno Setup output (build artifacts)
+installer/output/
+*.exe
+
+# .NET build artifacts
+gui/HermesInstaller/bin/
+gui/HermesInstaller/obj/
+
+# .tools downloaded by build.ps1
+.tools/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+*.suo
+*.user
+*.vs/
+.vscode/
+.idea/
+
+# Logs
+*.log
