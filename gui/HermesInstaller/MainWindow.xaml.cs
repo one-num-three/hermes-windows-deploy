@@ -126,6 +126,9 @@ public partial class MainWindow : Window
     private void TitleBar_MouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton == MouseButton.Left)
-            DragMove();
+        {
+            try { DragMove(); }
+            catch (InvalidOperationException) { /* 鼠标状态异常，忽略 */ }
+        }
     }
 }

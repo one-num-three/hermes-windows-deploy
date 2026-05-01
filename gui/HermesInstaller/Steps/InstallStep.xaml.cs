@@ -21,8 +21,10 @@ public partial class InstallStep : UserControl
 
     public async void StartInstallation(InstallContext context)
     {
-        _stepItems.Clear();
-        LogOutput.Text = "";
+        try
+        {
+            _stepItems.Clear();
+            LogOutput.Text = "";
 
         var steps = new[]
         {
@@ -71,6 +73,15 @@ public partial class InstallStep : UserControl
         CurrentStepLabel.Text = context.HasError ? "安装遇到错误" : "安装完成！";
 
         InstallationCompleted?.Invoke(this, !context.HasError);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[InstallStep] 安装崩溃: {ex}");
+            CurrentStepLabel.Text = "安装过程发生意外错误";
+            context.HasError = true;
+            context.ErrorMessage = ex.Message;
+            InstallationCompleted?.Invoke(this, false);
+        }
     }
 
     private async Task RunInstallStep(int stepIndex, InstallContext context)
@@ -212,8 +223,11 @@ public partial class InstallStep : UserControl
 
 public class InstallStepItem : INotifyPropertyChanged
 {
-    public string Icon { get; set; } = "";
-    public string Label { get; set; } = "";
+    private string _icon = "";
+    public string Icon { get => _icon; set { _icon = value; OnPropertyChanged(); } }
+    
+    private string _label = "";
+    public string Label { get => _label; set { _label = value; OnPropertyChanged(); } }
 
     private Brush _color = Brushes.Gray;
     public Brush Color

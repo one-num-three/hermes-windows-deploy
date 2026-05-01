@@ -40,6 +40,10 @@ Set-ItemProperty -Path $shellKey -Name "MUIVerb" -Value $menuText
 Set-ItemProperty -Path $shellKey -Name "Icon" -Value "powershell.exe"
 Set-ItemProperty -Path $shellKey -Name "ExtendedSubCommandsKey" -Value ""
 
+# 安全：使用单引号拼接避免 $PSScriptRoot 中特殊字符导致的命令注入
+$safeRoot = $PSScriptRoot -replace "'", "''"
+$sendToScript = "$safeRoot\send-to-hermes.ps1"
+
 # 子菜单：分析文件
 $subKey = "$shellKey\shell\analyze"
 New-Item -Path $subKey -Force | Out-Null
@@ -48,9 +52,7 @@ Set-ItemProperty -Path $subKey -Name "Icon" -Value "shell32.dll,166"
 
 $cmdKey = "$subKey\command"
 New-Item -Path $cmdKey -Force | Out-Null
-Set-ItemProperty -Path $cmdKey -Name "(Default)" -Value @"
-powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PSScriptRoot\send-to-hermes.ps1" -FilePath "%1" -Port $Port
-"@
+Set-ItemProperty -Path $cmdKey -Name "(Default)" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$sendToScript`" -FilePath `"%1`" -Port $Port"
 
 # 子菜单：读取文件内容
 $readKey = "$shellKey\shell\read"
@@ -60,9 +62,7 @@ Set-ItemProperty -Path $readKey -Name "Icon" -Value "shell32.dll,23"
 
 $readCmdKey = "$readKey\command"
 New-Item -Path $readCmdKey -Force | Out-Null
-Set-ItemProperty -Path $readCmdKey -Name "(Default)" -Value @"
-powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PSScriptRoot\send-to-hermes.ps1" -FilePath "%1" -Action "explain" -Port $Port
-"@
+Set-ItemProperty -Path $readCmdKey -Name "(Default)" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$sendToScript`" -FilePath `"%1`" -Action `"explain`" -Port $Port"
 
 # ---- 2. 文件夹右键 ----
 
@@ -80,9 +80,7 @@ Set-ItemProperty -Path $dirAnalyzeKey -Name "Icon" -Value "shell32.dll,4"
 
 $dirCmdKey = "$dirAnalyzeKey\command"
 New-Item -Path $dirCmdKey -Force | Out-Null
-Set-ItemProperty -Path $dirCmdKey -Name "(Default)" -Value @"
-powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PSScriptRoot\send-to-hermes.ps1" -FilePath "%1" -Action "analyze-project" -Port $Port
-"@
+Set-ItemProperty -Path $dirCmdKey -Name "(Default)" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$sendToScript`" -FilePath `"%1`" -Action `"analyze-project`" -Port $Port"
 
 # ---- 3. 文件夹背景右键 ----
 
@@ -92,9 +90,7 @@ Set-ItemProperty -Path $directoryBgKey -Name "Icon" -Value "powershell.exe"
 
 $bgCmdKey = "$directoryBgKey\command"
 New-Item -Path $bgCmdKey -Force | Out-Null
-Set-ItemProperty -Path $bgCmdKey -Name "(Default)" -Value @"
-powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PSScriptRoot\send-to-hermes.ps1" -FilePath "%V" -Action "open-chat" -Port $Port
-"@
+Set-ItemProperty -Path $bgCmdKey -Name "(Default)" -Value "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$sendToScript`" -FilePath `"%V`" -Action `"open-chat`" -Port $Port"
 
 Write-Host "[3/3] 注册完成" -ForegroundColor Green
 Write-Host ""

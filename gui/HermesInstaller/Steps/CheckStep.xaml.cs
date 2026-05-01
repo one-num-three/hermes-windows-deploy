@@ -20,8 +20,10 @@ public partial class CheckStep : UserControl
 
     public async void StartCheck()
     {
-        _items.Clear();
-        CheckProgress.IsIndeterminate = true;
+        try
+        {
+            _items.Clear();
+            CheckProgress.IsIndeterminate = true;
 
         var checks = new[]
         {
@@ -73,6 +75,14 @@ public partial class CheckStep : UserControl
         }
 
         EnvironmentChecked?.Invoke(this, allPassed);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CheckStep] 环境检测崩溃: {ex}");
+            ResultText.Text = "⚠ 检测过程出错，请重试";
+            ResultText.Foreground = new SolidColorBrush(Color.FromRgb(0xE7, 0x4C, 0x3C));
+            EnvironmentChecked?.Invoke(this, false);
+        }
     }
 
     private async Task<(bool passed, string detail)> RunCheck(string label)
@@ -102,10 +112,17 @@ public partial class CheckStep : UserControl
 
 public class CheckItem : INotifyPropertyChanged
 {
-    public string Icon { get; set; } = "";
-    public string Label { get; set; } = "";
-    public string Status { get; set; } = "";
-    public string Detail { get; set; } = "";
+    private string _icon = "";
+    public string Icon { get => _icon; set { _icon = value; OnPropertyChanged(); } }
+    
+    private string _label = "";
+    public string Label { get => _label; set { _label = value; OnPropertyChanged(); } }
+    
+    private string _status = "";
+    public string Status { get => _status; set { _status = value; OnPropertyChanged(); } }
+    
+    private string _detail = "";
+    public string Detail { get => _detail; set { _detail = value; OnPropertyChanged(); } }
 
     private Brush _statusColor = Brushes.Gray;
     public Brush StatusColor

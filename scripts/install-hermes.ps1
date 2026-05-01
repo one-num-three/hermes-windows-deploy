@@ -250,8 +250,10 @@ function Step-InstallWsl {
     }
 
     # 设置 WSL 默认版本为 2
-    wsl --set-default-version 2 2>&1 | Out-File $LogPath -Append
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = 0
+    wsl --set-default-version 2 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Null
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
         # WSL2 内核可能未安装，尝试安装
         Write-Step "WSL2 内核未安装，正在下载..." "warn"
         $kernelUrl = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
@@ -356,8 +358,9 @@ function Step-InstallUbuntu {
         Write-Step "提示: 使用 -WslPath 'D:\\WSL' 可安装到其他盘" "warn"
         try {
             $ubuntuOutput = wsl --install -d $Script:WSL_DISTRO 2>&1
+            $exitCode = $LASTEXITCODE
             $ubuntuOutput | Out-File $LogPath -Append
-            if ($LASTEXITCODE -ne 0) {
+            if ($exitCode -ne 0) {
                 Write-Error-And-Log "WSL Ubuntu 安装失败，请手动安装: wsl --install -d Ubuntu-24.04"
                 return $false
             }
@@ -430,8 +433,9 @@ function Step-BootstrapWsl {
     Write-Step "配置国内镜像源..." "start"
     if (Test-Path $mirrorScript) {
         $mirrorOutput = wsl -d $Script:WSL_DISTRO -u root -- bash /tmp/setup-mirrors.sh 2>&1
+        $exitCode = $LASTEXITCODE
         $mirrorOutput | Out-File $LogPath -Append
-        if ($LASTEXITCODE -ne 0) {
+        if ($exitCode -ne 0) {
             Write-Step "镜像源配置部分失败，继续安装" "warn"
         }
     }
@@ -494,9 +498,10 @@ echo "[Hermes] Done."
 "@
 
     $hermesOutput = $installScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
+    $exitCode = $LASTEXITCODE
     $hermesOutput | Out-File $LogPath -Append
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($exitCode -ne 0) {
         Write-Error-And-Log "Hermes 安装失败"
         return $false
     }
@@ -537,9 +542,10 @@ echo "[WebUI] Done."
 "@
 
     $webUiOutput = $webUiScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
+    $exitCode = $LASTEXITCODE
     $webUiOutput | Out-File $LogPath -Append
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($exitCode -ne 0) {
         Write-Error-And-Log "hermes-web-ui 安装失败"
         return $false
     }
@@ -595,8 +601,9 @@ function Step-IntegrateDesktop {
         Copy-Item $integrateScript -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\integrate-desktop.sh" -Force
         Write-Step "正在注入桌面增强模块..." "start"
         $integrateOutput = wsl -d $Script:WSL_DISTRO -u root -- bash /tmp/integrate-desktop.sh $Script:WSL_USER 2>&1
+        $exitCode = $LASTEXITCODE
         $integrateOutput | Out-File $LogPath -Append
-        if ($LASTEXITCODE -ne 0) {
+        if ($exitCode -ne 0) {
             Write-Step "部分集成失败，基础功能仍可用" "warn"
         } else {
             Write-Step "Agent Chat + 审批面板 + Tool Hub 已集成" "ok"
@@ -660,9 +667,10 @@ function Step-SetupAutoStart {
     $svcOutput2 = wsl -d $Script:WSL_DISTRO -u root -- systemctl enable hermes 2>&1
     $svcOutput2 | Out-File $LogPath -Append
     $svcOutput3 = wsl -d $Script:WSL_DISTRO -u root -- systemctl start hermes 2>&1
+    $exitCode = $LASTEXITCODE
     $svcOutput3 | Out-File $LogPath -Append
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($exitCode -ne 0) {
         Write-Step "systemd 启动失败，WSL 可能未运行 systemd" "warn"
         Write-Step "请手动运行: wsl -d $Script:WSL_DISTRO -- hermes gateway" "warn"
     }

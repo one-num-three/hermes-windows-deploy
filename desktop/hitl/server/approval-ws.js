@@ -7,8 +7,14 @@
 
 const WebSocket = require('ws');
 
-// 从环境变量读取共享密钥，未配置则使用默认（仅开发模式，生产必须设置）
-const SHARED_SECRET = process.env.HERMES_APPROVAL_SECRET || 'hermes-dev-secret-change-in-production';
+// 从环境变量读取共享密钥，未配置则拒绝启动（生产安全要求）
+const SHARED_SECRET = process.env.HERMES_APPROVAL_SECRET;
+if (!SHARED_SECRET) {
+    console.error('[Approval] FATAL: HERMES_APPROVAL_SECRET environment variable is required.');
+    console.error('[Approval] Please set it before starting the server, e.g.:');
+    console.error('[Approval]   export HERMES_APPROVAL_SECRET="$(openssl rand -hex 32)"');
+    process.exit(1);
+}
 const AUTH_TIMEOUT_MS = 10000; // 客户端需在 10 秒内完成认证
 
 class ApprovalManager {

@@ -90,4 +90,6 @@ if (Test-Path $wslConfig) {
     Write-Host "  如果不再使用 WSL，可手动删除此文件" -ForegroundColor DarkGray
 }
 
-Read-Host "按 Enter 退出"
+if (-not $Force) {
+    Read-Host "按 Enter 退出"
+}
