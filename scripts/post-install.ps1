@@ -46,32 +46,33 @@ if (Test-Path $shellScript) {
     }
 }
 
-# 4. 确保 WSL 不自动休眠
-Write-Host "[4/5] 配置 WSL 持久化..."
-$wslConfigPath = "$env:USERPROFILE\.wslconfig"
-$wslConfig = @"
-# Hermes Agent - WSL 配置
-# 文档: https://learn.microsoft.com/zh-cn/windows/wsl/wsl-config
-[wsl2]
-memory=4GB
-processors=2
-swap=2GB
-networkingMode=mirrored
-localhostForwarding=true
-"@
+# 4. 确保 WSL 不自动休眠 — 读取现有配置进行合并，不覆盖
+Write-Host "[4/4] 配置 WSL 持久化..."
+$wslConfigPath = "$([Environment]::GetFolderPath('UserProfile'))\.wslconfig"
 
 if (Test-Path $wslConfigPath) {
     $existing = Get-Content $wslConfigPath -Raw
+    # 仅添加缺失的 localhostForwarding 条目
     if ($existing -notmatch "localhostForwarding") {
         Add-Content -Path $wslConfigPath -Value "`nlocalhostForwarding=true"
+        Write-Host "  已追加 localhostForwarding 到现有 .wslconfig" -ForegroundColor Green
+    } else {
+        Write-Host "  .wslconfig 已包含 localhostForwarding，跳过" -ForegroundColor Green
     }
 } else {
+    $wslConfig = @"
+# Hermes Agent - WSL 配置
+# 文档: https://learn.microsoft.com/zh-cn/windows/wsl/wsl-config
+[wsl2]
+localhostForwarding=true
+"@
     Set-Content -Path $wslConfigPath -Value $wslConfig
+    Write-Host "  .wslconfig 已创建（仅含 localhostForwarding，避免覆盖其他配置）" -ForegroundColor Green
 }
 Write-Host "  .wslconfig 已配置" -ForegroundColor Green
 
-# 4. 添加 Windows Terminal 配置（可选）
-Write-Host "[5/5] 检查 Windows Terminal..."
+# 可选：检查 Windows Terminal（仅信息显示，不占用步骤编号）
+Write-Host "[i] 检查 Windows Terminal..."
 $wtSettings = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
 if (Test-Path $wtSettings) {
     Write-Host "  Windows Terminal 已安装" -ForegroundColor Green

@@ -67,7 +67,7 @@ Agent Chat 对话面板 — Vue 3 组件
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted, watch } from 'vue';
+import { ref, nextTick, onMounted, onUnmounted } from 'vue';
 
 const messages = ref([]);
 const inputMessage = ref('');

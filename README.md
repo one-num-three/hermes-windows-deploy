@@ -88,13 +88,13 @@ hermes-windows-deploy/
 
 ```powershell
 # 无人值守安装
-.\install-hermes.ps1 -Unattended
+.\scripts\install-hermes.ps1 -Unattended
 
 # 自定义端口
-.\install-hermes.ps1 -Port 9000
+.\scripts\install-hermes.ps1 -Port 9000
 
 # 使用 Gitee 镜像（替代 GitHub）
-.\install-hermes.ps1 -MirrorGitee
+.\scripts\install-hermes.ps1 -MirrorGitee
 ```
 
 ## 环境检测

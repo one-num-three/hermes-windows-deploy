@@ -12,8 +12,12 @@ echo "=== 配置国内镜像源 ==="
 echo "[1/3] 配置 apt 镜像源..."
 if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
     # Ubuntu 24.04+ 使用 deb822 格式
-    # 保留原文件
-    cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak 2>/dev/null || true
+    # 保留原文件（如果备份已存在则不重复备份）
+    if [ ! -f /etc/apt/sources.list.d/ubuntu.sources.bak ]; then
+        cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak 2>/dev/null || true
+    else
+        echo "  ubuntu.sources.bak 已存在，跳过备份"
+    fi
     sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
     sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
     sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' /etc/apt/sources.list.d/ubuntu.sources
@@ -24,7 +28,11 @@ elif [ -f /etc/apt/sources.list ]; then
     else
         CODENAME="noble"
     fi
-    cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    if [ ! -f /etc/apt/sources.list.bak ]; then
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+    else
+        echo "  sources.list.bak 已存在，跳过备份"
+    fi
     cat > /etc/apt/sources.list << EOF
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ $CODENAME main restricted universe multiverse
 deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ $CODENAME-updates main restricted universe multiverse

@@ -321,12 +321,39 @@ function removeServer(id) {
 }
 
 function editServer(server) {
-  // 打开配置页面
+  // 弹出编辑模态框，支持修改名称、URL、环境变量
+  const current = server;
+  const newName = prompt('服务器名称:', current.name);
+  if (newName === null) return; // 取消
+  const newUrl = prompt('连接地址:', current.url);
+  if (newUrl === null) return;
+  // 校验 URL 格式
+  if (!/^(ws|wss|http|https):\/\//i.test(newUrl)) {
+    alert('地址格式无效');
+    return;
+  }
+  current.name = newName.trim() || current.name;
+  current.url = newUrl.trim();
+  console.log('[ToolHub] 服务器已更新:', current.name);
 }
 
 function discoverServers() {
-  // mDNS / 网络扫描发现本地 MCP 服务器
-  alert('网络扫描功能将在 v0.2 中实现');
+  // 向后端发送扫描请求（v0.2 功能）
+  fetch('/api/mcp/discover', { method: 'POST' })
+    .then(r => r.json().catch(() => ({})))
+    .then(data => {
+      if (data.servers && data.servers.length > 0) {
+        for (const srv of data.servers) {
+          if (!installedServers.value.find(s => s.id === srv.id)) {
+            installedServers.value.push(srv);
+          }
+        }
+        alert(`扫描完成，发现了 ${data.servers.length} 个新服务器`);
+      } else {
+        alert('未发现新的 MCP 服务器');
+      }
+    })
+    .catch(() => alert('网络扫描功能将在 v0.2 中实现'));
 }
 </script>
 

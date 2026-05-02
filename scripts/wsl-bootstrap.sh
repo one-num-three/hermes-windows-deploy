@@ -30,9 +30,9 @@ index-url = https://pypi.tuna.tsinghua.edu.cn/simple
 trusted-host = pypi.tuna.tsinghua.edu.cn
 EOF
 
-# 设置 git 代理
+# 设置 git 代理（以目标用户身份执行）
 echo "[4/6] 配置 Git 代理..."
-git config --global url."https://ghproxy.com/https://github.com/".insteadOf "https://github.com/"
+su - "$USERNAME" -c 'git config --global url."https://ghproxy.com/https://github.com/".insteadOf "https://github.com/"'
 
 # 确保 ~/.local/bin 在 PATH
 echo "[5/6] 配置 PATH..."

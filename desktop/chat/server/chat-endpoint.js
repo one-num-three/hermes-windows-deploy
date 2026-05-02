@@ -9,9 +9,6 @@ const express = require('express');
 const { spawn, execFileSync } = require('child_process');
 const router = express.Router();
 
-// SSE 客户端管理
-const clients = new Map();
-
 /**
  * POST /api/chat
  * 发送消息到 Hermes Agent，返回 SSE 流
@@ -26,7 +23,7 @@ const clients = new Map();
  *   - done: 对话完成
  *   - error: 错误信息
  */
-router.post('/chat', async (req, res) => {
+router.post('/chat', requireAuth, async (req, res) => {
     const { message, sessionId, model } = req.body;
 
     // 输入校验：message 必须是非空字符串

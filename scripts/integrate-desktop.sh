@@ -2,19 +2,28 @@
 # =============================================================================
 # Hermes 桌面增强功能集成脚本
 # 在 hermes-web-ui 安装后执行，注入 Chat/审批/ToolHub 等模块
-# 调用: sudo bash integrate-desktop.sh <username>
+# 调用: sudo bash integrate-desktop.sh <username> [port]
 # =============================================================================
 set -e
 
 USER="${1:-hermes}"
+PORT="${2:-8648}"
 HOME_DIR="/home/$USER"
 
 echo "=== Hermes 桌面增强集成 ==="
 echo "用户: $USER"
 
+# 幂等性检查：如果已集成过，跳过
+if [ -f "$HOME_DIR/.hermes/.integrated" ]; then
+    echo "检测到上次集成已完成，跳过（如需重新集成请删除 $HOME_DIR/.hermes/.integrated）"
+    exit 0
+fi
+
 # ---- 1. 找到 hermes-web-ui 安装位置 ----
-WEBUI_DIR=$(npm root -g 2>/dev/null)/hermes-web-ui
-if [ ! -d "$WEBUI_DIR" ]; then
+NPM_ROOT=$(npm root -g 2>/dev/null) || true
+if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT/hermes-web-ui" ]; then
+    WEBUI_DIR="$NPM_ROOT/hermes-web-ui"
+else
     # 尝试其他可能路径
     WEBUI_DIR="/usr/lib/node_modules/hermes-web-ui"
 fi
@@ -73,10 +82,8 @@ echo "[4/6] 注册前端路由..."
 ROUTER_FILE="$WEBUI_DIR/client/src/router/index.js"
 if [ -f "$ROUTER_FILE" ]; then
     if ! grep -q "ChatPage" "$ROUTER_FILE"; then
-        # 在路由数组前添加 import
-        sed -i '1i import ChatPage from "@/views/hermes/ChatPage.vue"' "$ROUTER_FILE" 2>/dev/null || true
-        sed -i '1i import ApprovalPanel from "@/views/hermes/ApprovalPanel.vue"' "$ROUTER_FILE" 2>/dev/null || true
-        sed -i '1i import ToolHub from "@/views/hermes/ToolHub.vue"' "$ROUTER_FILE" 2>/dev/null || true
+        # 合并为一条 sed 命令，避免 3 次 1i 导致倒序
+        sed -i '1i import ToolHub from "@/views/hermes/ToolHub.vue"\nimport ApprovalPanel from "@/views/hermes/ApprovalPanel.vue"\nimport ChatPage from "@/views/hermes/ChatPage.vue"' "$ROUTER_FILE" 2>/dev/null || true
         echo "  已添加路由导入"
     fi
 fi
@@ -129,10 +136,14 @@ STARTEOF
 chmod +x "$HOME_DIR/.local/bin/hermes-start"
 chown "$USER:$USER" "$HOME_DIR/.local/bin/hermes-start"
 
+# 标记集成完成（用于幂等性检查）
+touch "$HOME_DIR/.hermes/.integrated"
+chown "$USER:$USER" "$HOME_DIR/.hermes/.integrated"
+
 echo "=== 集成完成 ==="
 echo ""
 echo "新增功能:"
-echo "  • Agent Chat 对话面板 → http://localhost:8648/chat"
+echo "  • Agent Chat 对话面板 → http://localhost:${PORT}/chat"
 echo "  • HITL 审批面板 → 敏感操作自动弹出"
 echo "  • MCP Tool Hub → 工具注册管理"
 echo "  • 右键菜单 → Windows 资源管理器集成"

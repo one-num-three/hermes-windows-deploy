@@ -174,8 +174,26 @@ function Step-BootstrapInno {
     }
 
     New-Item -ItemType Directory -Path $ISCC_DIR -Force | Out-Null
-    Write-Step "安装 Inno Setup 到 .tools\innosetup\..." "info"
-    $proc = Start-Process $installer -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$ISCC_DIR`"" -Wait -PassThru
+    Write-Step "安装 Inno Setup 到 .tools\innosetup..." "info"
+    # 启动安装进程并等待，添加超时保护（120 秒后自动终止）
+    $innoJob = Start-Job -ScriptBlock {
+        param($exe, $args)
+        Start-Process $exe -ArgumentList $args -Wait -PassThru -NoNewWindow
+    } -ArgumentList $installer, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$ISCC_DIR`""
+    $innoJob | Wait-Job -Timeout 120 | Out-Null
+    if ($innoJob.State -eq 'Running') {
+        $innoJob | Stop-Job -PassThru | Remove-Job
+        Write-Step "Inno Setup 安装超时（120s），已终止" "err"
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    $result = $innoJob | Receive-Job
+    $innoJob | Remove-Job
+    if (-not $result -or $result.ExitCode -ne 0) {
+        Write-Step "Inno Setup 安装失败" "err"
+        Remove-Item $installer -Force -ErrorAction SilentlyContinue
+        return $false
+    }
     Remove-Item $installer -Force -ErrorAction SilentlyContinue
 
     if (-not (Test-Path $localIscc)) {

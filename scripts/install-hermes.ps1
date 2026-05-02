@@ -12,7 +12,7 @@ param(
     [string]$Port = "8648",      # Web UI 端口
     [switch]$MirrorGitee,       # 使用 Gitee 镜像（替代 GitHub）
     [string]$WslPath = "",      # WSL 安装路径（如 D:\WSL），留空则默认 C 盘
-    [string]$LogPath = "$env:USERPROFILE\hermes-install.log"
+    [string]$LogPath = "$([Environment]::GetFolderPath('UserProfile'))\hermes-install.log"
 )
 
 # =============================================================================
@@ -21,8 +21,8 @@ param(
 $Script:WSL_DISTRO = "Ubuntu-24.04"
 $Script:WSL_USER = ""
 $Script:WEB_PORT = $Port
-$Script:STATE_FILE = "$env:USERPROFILE\.hermes\install-state.json"
-$Script:CDN_BASE = "http://121.40.165.216/hermes-cdn/files"
+$Script:STATE_FILE = "$([Environment]::GetFolderPath('UserProfile'))\.hermes\install-state.json"
+$Script:CDN_BASE = "https://121.40.165.216/hermes-cdn/files"
 $Script:GITHUB_PROXY = "https://ghproxy.com/"  # GitHub 加速代理（备用）
 $Script:HERMES_REPO = "https://github.com/NousResearch/hermes-agent.git"
 $Script:HERMES_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
@@ -402,11 +402,20 @@ function Step-BootstrapWsl {
         $random = -join ((1..12) | ForEach-Object { $chars[(Get-Random -Max $chars.Length)] })
         $Script:WSL_PASSWORD = $random
 
-        wsl -d $Script:WSL_DISTRO -u root -- bash -c "
-            useradd -m -s /bin/bash $Script:WSL_USER
-            echo '$Script:WSL_USER:$Script:WSL_PASSWORD' | chpasswd
-            echo '$Script:WSL_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$Script:WSL_USER
-        " 2>&1 | Out-File $LogPath -Append
+        # Base64 编码用户名和密码，防止特殊字符破坏 bash（单引号等）
+        $userB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_USER))
+        $passB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_PASSWORD))
+
+        $createOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c "
+            USER_B64='$userB64'; PASS_B64='$passB64'
+            WSL_USER=\$(echo \"\$USER_B64\" | base64 -d)
+            WSL_PASS=\$(echo \"\$PASS_B64\" | base64 -d)
+            useradd -m -s /bin/bash \"\$WSL_USER\"
+            echo \"\$WSL_USER:\$WSL_PASS\" | chpasswd
+            echo \"\$WSL_USER ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/\"\$WSL_USER\"
+        " 2>&1
+        $exitCode = $LASTEXITCODE
+        $createOutput | Out-File $LogPath -Append
 
         Write-Step "用户已创建，密码已自动生成" "ok"
     } else {
@@ -468,28 +477,34 @@ CDN="$($Script:CDN_BASE)"
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3 python3-pip python3-venv curl
 
-# 从 CDN 下载安装脚本并执行
+# 从 CDN 下载安装脚本并执行（HTTPS 校验签名）
 echo "[Hermes] 从 CDN 下载安装脚本..."
 curl -fsSL "\$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
-# 下载校验文件并验证完整性
+# 下载 SHA256 校验文件
 echo "[Hermes] 验证文件完整性..."
 curl -fsSL "\$CDN/files.sha256" -o /tmp/files.sha256
 if ! grep -q "hermes-install-standalone.sh" /tmp/files.sha256; then
     echo "[Hermes] 校验文件无效，中止安装"
     exit 1
 fi
-pushd /tmp > /dev/null
-if ! sha256sum -c files.sha256 --ignore-missing 2>/dev/null; then
-    pushd /tmp > /dev/null
-    if ! sha256sum --check files.sha256 --ignore-missing 2>/dev/null; then
+
+# 验证 SHA256 校验和（回退到 openssl/shasum 如果没有 sha256sum）
+if command -v sha256sum &>/dev/null; then
+    if ! sha256sum -c /tmp/files.sha256 --ignore-missing 2>/dev/null; then
         echo "[Hermes] 文件校验失败！可能被篡改或下载损坏"
-        echo "[Hermes] 请重新运行安装脚本"
         exit 1
     fi
-    popd > /dev/null
+elif command -v openssl &>/dev/null; then
+    FILE_HASH=\$(openssl dgst -sha256 /tmp/hermes-install.sh | awk '{print \$NF}')
+    EXPECTED_HASH=\$(grep 'hermes-install-standalone.sh' /tmp/files.sha256 | awk '{print \$1}')
+    if [ "\$FILE_HASH" != "\$EXPECTED_HASH" ]; then
+        echo "[Hermes] 文件校验失败！sha256 不匹配"
+        exit 1
+    fi
+else
+    echo "[Hermes] 警告：无 sha256sum 或 openssl，跳过校验"
 fi
-popd > /dev/null
 echo "[Hermes] 校验通过"
 
 bash /tmp/hermes-install.sh
@@ -788,9 +803,13 @@ function Main {
 
     Write-Host "Web UI 地址:  http://localhost:$Script:WEB_PORT" -ForegroundColor Cyan
     if ($Script:WSL_PASSWORD) {
-        Write-Host "Ubuntu 用户:  $Script:WSL_USER" -ForegroundColor White
-        Write-Host "Ubuntu 密码:  $Script:WSL_PASSWORD" -ForegroundColor White
-        Write-Host "（日常使用不需要密码，仅 sudo/ssh 时需要）" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "⚠️  请立即记录以下信息！密码仅在此显示一次，不会写入日志文件" -ForegroundColor Yellow
+        Write-Host "  Ubuntu 用户:  $Script:WSL_USER" -ForegroundColor White
+        Write-Host "  Ubuntu 密码:  $Script:WSL_PASSWORD" -ForegroundColor White
+        Write-Host "  （日常使用不需要密码，仅 sudo/ssh 时需要）" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  请自行保管好密码，本脚本不会保存密码到任何文件" -ForegroundColor Yellow
     }
     Write-Host "安装日志:    $LogPath" -ForegroundColor DarkGray
     Write-Host ""

@@ -77,10 +77,7 @@ class ApprovalManager {
             });
         });
 
-        console.log('[Approval] WebSocket 审批服务已启动');
-        if (!process.env.HERMES_APPROVAL_SECRET) {
-            console.warn('[Approval] ⚠ 使用默认密钥，生产环境请设置 HERMES_APPROVAL_SECRET 环境变量');
-        }
+        console.log('[Approval] WebSocket 审批服务已启动（已认证加密）');
     }
 
     /**

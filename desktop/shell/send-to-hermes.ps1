@@ -10,6 +10,14 @@ param(
     [string]$Port = "8648"
 )
 
+# 安全校验：路径合法性
+if ([string]::IsNullOrWhiteSpace($FilePath) -or $FilePath.Length -gt 260) {
+    Write-Host "错误: 文件路径为空或超过 260 字符" -ForegroundColor Red
+    exit 1
+}
+# 过滤路径中的不可打印字符
+$FilePath = $FilePath -replace '[\x00-\x1f]', ''
+
 $apiUrl = "http://localhost:$Port/api/chat"
 
 # 根据 Action 构造提示语

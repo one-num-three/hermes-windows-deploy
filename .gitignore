@@ -1,24 +1,43 @@
-# Inno Setup output (build artifacts)
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+publish/
+dist/
+build/
+out/
+logs/
 installer/output/
-*.exe
-
-# .NET build artifacts
-gui/HermesInstaller/bin/
-gui/HermesInstaller/obj/
-
-# .tools downloaded by build.ps1
 .tools/
+bin/
+obj/
 
-# OS files
-.DS_Store
-Thumbs.db
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Coverage
+coverage/
+coverage.*.json
+__pycache__/
+*.pyc
 
 # IDE
-*.suo
-*.user
-*.vs/
 .vscode/
 .idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
-# Logs
-*.log
+# OS
+.DS_Store
+Thumbs.db
