@@ -75,8 +75,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; Description: "启动 Hermes 安装向导"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; 卸载时调用清理脚本
-Filename: "powershell.exe"; Parameters: "-File ""{app}\scripts\uninstall.ps1"" -Force"; Flags: runhidden
+; 卸载时调用清理脚本（StatusMsg 在 Inno Setup 卸载进度页显示，提供用户反馈）
+Filename: "powershell.exe"; Parameters: "-File ""{app}\scripts\uninstall.ps1"" -Force"; Flags: runhidden; StatusMsg: "正在清理 Hermes Agent..."
 
 [Code]
 // 检测 WSL 是否已安装

@@ -11,6 +11,11 @@ public partial class MainWindow : Window
     private readonly List<UserControl> _steps;
     private readonly InstallContext _context;
 
+    // 保存事件处理器引用以便注销
+    private readonly EventHandler<bool> _onEnvironmentChecked;
+    private readonly EventHandler<bool> _onAgreementChanged;
+    private readonly EventHandler<bool> _onInstallationCompleted;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -19,7 +24,7 @@ public partial class MainWindow : Window
         _steps = new List<UserControl> { WelcomePage, CheckPage, InstallPage, FinishPage };
 
         // CheckStep 完成后自动通知
-        CheckPage.EnvironmentChecked += (_, passed) =>
+        _onEnvironmentChecked = (_, passed) =>
         {
             if (passed)
             {
@@ -27,19 +32,32 @@ public partial class MainWindow : Window
                 NextButton.IsEnabled = true;
             }
         };
+        CheckPage.EnvironmentChecked += _onEnvironmentChecked;
 
         // WelcomeStep 同意复选框控制「下一步」按钮
-        WelcomePage.AgreementChanged += (_, agreed) =>
+        _onAgreementChanged = (_, agreed) =>
         {
             NextButton.IsEnabled = agreed;
         };
-        InstallPage.InstallationCompleted += (_, success) =>
+        WelcomePage.AgreementChanged += _onAgreementChanged;
+
+        // InstallStep 安装完成通知
+        _onInstallationCompleted = (_, success) =>
         {
             NextButton.IsEnabled = true;
             if (success)
             {
                 NextButton.Content = "完成 ✓";
             }
+        };
+        InstallPage.InstallationCompleted += _onInstallationCompleted;
+
+        // 窗口关闭时注销事件
+        Closed += (_, _) =>
+        {
+            CheckPage.EnvironmentChecked -= _onEnvironmentChecked;
+            WelcomePage.AgreementChanged -= _onAgreementChanged;
+            InstallPage.InstallationCompleted -= _onInstallationCompleted;
         };
 
         ShowStep(0);

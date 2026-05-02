@@ -48,9 +48,6 @@ public partial class CheckStep : UserControl
             };
             _items.Add(item);
 
-            // 模拟检测（实际应调用 test-env.ps1）
-            await Task.Delay(800);
-
             var (passed, detail) = await RunCheck(check.Label);
             item.Status = passed ? "✓" : "✗";
             item.StatusColor = passed

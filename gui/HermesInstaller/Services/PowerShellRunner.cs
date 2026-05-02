@@ -73,11 +73,13 @@ public class PowerShellRunner
         var exitCodeFile = Path.Combine(Path.GetTempPath(), $"hermes_exit_{Guid.NewGuid():N}.txt");
 
         // 构造包装脚本：执行目标脚本并将输出写入临时文件
+        // safeArgs 已被 SanitizeArguments 移除全部单引号，Replac 作为空操作保留
+        var escapedArgs = safeArgs;
         var wrapperScript = Path.Combine(Path.GetTempPath(), $"hermes_wrapper_{Guid.NewGuid():N}.ps1");
         var wrapperContent = $@"
 $ErrorActionPreference = 'Continue'
 try {{
-    & '{scriptPath.Replace("'", "''")}' {safeArgs} *> '{outputFile.Replace("'", "''")}'
+    & '{scriptPath.Replace("'", "''")}' {escapedArgs} *> '{outputFile.Replace("'", "''")}'
     $LASTEXITCODE | Out-File -FilePath '{exitCodeFile.Replace("'", "''")}'
 }} catch {{
     $_.Exception.Message | Out-File -FilePath '{errorFile.Replace("'", "''")}'
@@ -132,18 +134,22 @@ try {{
 
     private static void SafeDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { /* 忽略清理失败 */ }
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[PowerShellRunner] 清理临时文件失败: {path} - {ex.Message}"); }
     }
+
+    private static readonly System.Text.RegularExpressions.Regex _sanitizeRegex = new(
+        @"[;&|`$(){}[\]'""#@]", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
     /// 过滤 PowerShell 参数中的危险注入字符
+    /// 注意：这是一个纵深防御层。外层调用者应先对参数做白名单格式校验。
     /// </summary>
     private static string SanitizeArguments(string args)
     {
         if (string.IsNullOrEmpty(args)) return "";
-        // 移除可能导致命令注入的字符序列
-        return System.Text.RegularExpressions.Regex.Replace(args,
-            @"[;&|`$(){}[\]]", ""); // 移除 shell 元字符
+        // 移除可能导致命令注入的字符序列（含单引号、双引号、井号注释、at符号）
+        return _sanitizeRegex.Replace(args, ""); // 移除 shell 元字符
     }
 
     /// <summary>
@@ -172,7 +178,8 @@ try {{
         }
 
         // 安全：将命令 base64 编码后传递，防止 shell 注入
-        // 使用 UTF-8 编码防止宽字符注入
+        // base64 字符集 [A-Za-z0-9+/=] 不含任何 shell 元字符，因此直接拼入
+        // bash -c 双引号上下文是安全的。若未来更改编码方案，需重新评估此拼接。
         var commandBytes = System.Text.Encoding.UTF8.GetBytes(command);
         var base64Command = Convert.ToBase64String(commandBytes);
 
@@ -189,21 +196,28 @@ try {{
 
         using var process = new Process { StartInfo = psi };
         var output = new System.Text.StringBuilder();
+        var error = new System.Text.StringBuilder();
 
         process.OutputDataReceived += (_, e) =>
         {
             if (e.Data != null) output.AppendLine(e.Data);
         };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data != null) error.AppendLine(e.Data);
+        };
 
         process.Start();
         process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
 
         await process.WaitForExitAsync();
 
         return new PowerShellResult
         {
             ExitCode = process.ExitCode,
-            Output = output.ToString()
+            Output = output.ToString(),
+            Error = error.ToString()
         };
     }
 }

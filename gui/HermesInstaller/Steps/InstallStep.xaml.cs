@@ -77,10 +77,12 @@ public partial class InstallStep : UserControl
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[InstallStep] 安装崩溃: {ex}");
-            CurrentStepLabel.Text = "安装过程发生意外错误";
+            try { CurrentStepLabel.Text = "安装过程发生意外错误"; } catch { /* UI 可能已销毁 */ }
             context.HasError = true;
             context.ErrorMessage = ex.Message;
-            InstallationCompleted?.Invoke(this, false);
+            try { InstallationCompleted?.Invoke(this, false); } catch (Exception evEx) {
+                System.Diagnostics.Debug.WriteLine($"[InstallStep] 事件处理器异常: {evEx}");
+            }
         }
     }
 

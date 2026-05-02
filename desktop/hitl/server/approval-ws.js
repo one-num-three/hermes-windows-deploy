@@ -6,6 +6,14 @@
  */
 
 const WebSocket = require('ws');
+const crypto = require('crypto');
+
+// 常量时间字符串比较，防止时序攻击泄露共享密钥
+function safeCompare(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
 
 // 从环境变量读取共享密钥，未配置则拒绝启动（生产安全要求）
 const SHARED_SECRET = process.env.HERMES_APPROVAL_SECRET;
@@ -43,7 +51,7 @@ class ApprovalManager {
 
                     // 首条消息必须是认证
                     if (!authenticated) {
-                        if (msg.type === 'auth' && msg.token === SHARED_SECRET) {
+                        if (msg.type === 'auth' && safeCompare(msg.token, SHARED_SECRET)) {
                             authenticated = true;
                             clearTimeout(authTimer);
                             this.clients.add(ws);
@@ -240,7 +248,10 @@ class ApprovalManager {
         const data = JSON.stringify(msg);
         this.clients.forEach((client) => {
             if (client.readyState === WebSocket.OPEN) {
-                client.send(data);
+                try { client.send(data); }
+                catch (sendErr) {
+                    console.error('[Approval] broadcast 发送失败:', sendErr.message);
+                }
             }
         });
     }

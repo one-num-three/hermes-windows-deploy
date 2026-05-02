@@ -129,12 +129,9 @@ async function sendMessage(text) {
   scrollToBottom();
 
   try {
-    // 读取 CSRF token（服务端渲染时注入到 meta 标签）
-    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    // 认证通过 x-api-key header，由服务端 requireAuth 中间件处理
+    // 前端无需额外处理 CSRF（API Key 认证本身不受 CSRF 影响）
     const headers = { 'Content-Type': 'application/json' };
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken;
-    }
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers,
@@ -173,8 +170,10 @@ async function sendMessage(text) {
               streamingContent.value = '';
             }
           } catch (e) {
-            // 非 JSON 行，追加到流式内容
-            streamingContent.value += line;
+            // 非 JSON 行，追加到流式内容（限制最大长度防异常数据撑爆内存）
+            if (line.length <= 5000) {
+              streamingContent.value += line;
+            }
           }
         }
       }

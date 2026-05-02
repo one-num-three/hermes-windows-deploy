@@ -88,6 +88,7 @@ const editingId = ref(null);
 const editedCommand = ref('');
 let ws = null;
 let reconnectAttempts = 0;
+let reconnectTimerId = null;
 const MAX_RECONNECT_DELAY = 30000; // 最大重连间隔 30 秒
 
 // WebSocket 连接
@@ -97,7 +98,13 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempts = 0; // 连接成功后重置计数
-    const authToken = document.querySelector('meta[name="hermes-approval-token"]')?.content || 'hermes-dev-secret-change-in-production';
+    const authToken = document.querySelector('meta[name="hermes-approval-token"]')?.content;
+    // 安全检查：没有令牌则拒绝连接，绝不回退到硬编码密钥
+    if (!authToken) {
+      console.error('[Approval] FATAL: 缺少认证令牌 (meta[name="hermes-approval-token"])，WebSocket 审批不可用。');
+      ws.close(4000, '缺少认证令牌');
+      return;
+    }
     ws.send(JSON.stringify({ type: 'auth', token: authToken }));
   };
 
@@ -145,7 +152,7 @@ function connect() {
     reconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
     console.log(`[Approval] 连接断开，${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)`);
-    setTimeout(connect, delay);
+    reconnectTimerId = setTimeout(connect, delay);
   };
 }
 
@@ -210,6 +217,10 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (reconnectTimerId) {
+    clearTimeout(reconnectTimerId);
+    reconnectTimerId = null;
+  }
   if (ws) ws.close();
 });
 </script>

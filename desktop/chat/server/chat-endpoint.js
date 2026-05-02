@@ -50,10 +50,10 @@ router.post('/chat', requireAuth, async (req, res) => {
         'X-Accel-Buffering': 'no',
     });
 
-    // 校验 sessionId 格式
+    // 校验 sessionId 格式，否则生成安全的随机 ID（不可预测）
     const chatId = (sessionId && /^[a-zA-Z0-9_-]{1,64}$/.test(sessionId))
         ? sessionId
-        : `chat_${Date.now()}`;
+        : `chat_${require('crypto').randomUUID()}`;
 
     // 发送连接确认
     res.write(`event: connected\ndata: ${JSON.stringify({ chatId })}\n\n`);
@@ -70,6 +70,9 @@ router.post('/chat', requireAuth, async (req, res) => {
             env: { ...process.env, HOME: process.env.HOME },
             stdio: ['pipe', 'pipe', 'pipe'],
         });
+
+        // 用于防御 res.end() 被多次调用
+        let responseEnded = false;
 
         // 安全：消息通过 stdin 传递，而非命令行参数
         proc.stdin.write(message);
@@ -118,6 +121,8 @@ router.post('/chat', requireAuth, async (req, res) => {
         });
 
         proc.on('close', (code) => {
+            if (responseEnded) return;
+            responseEnded = true;
             if (code === 0) {
                 res.write(`event: done\ndata: ${JSON.stringify({
                     type: 'done',
@@ -135,6 +140,8 @@ router.post('/chat', requireAuth, async (req, res) => {
         });
 
         proc.on('error', (err) => {
+            if (responseEnded) return;
+            responseEnded = true;
             res.write(`event: error\ndata: ${JSON.stringify({
                 type: 'error',
                 message: err.message,
@@ -160,13 +167,22 @@ router.post('/chat', requireAuth, async (req, res) => {
 
 // 简单 API Key 认证中间件（生产环境应使用更完善的方案）
 const API_KEY = process.env.HERMES_API_KEY || '';
+const crypto = require('crypto');
+
+// 常量时间字符串比较，防止时序攻击泄露密钥
+function safeCompare(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
 function requireAuth(req, res, next) {
     // 如果未配置 API_KEY 则跳过认证（开发模式）
     if (!API_KEY) {
         return next();
     }
     const providedKey = req.headers['x-api-key'] || req.query.api_key || '';
-    if (providedKey !== API_KEY) {
+    if (!safeCompare(providedKey, API_KEY)) {
         return res.status(401).json({ error: 'unauthorized: invalid or missing API key' });
     }
     next();

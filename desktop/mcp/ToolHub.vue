@@ -295,9 +295,8 @@ async function connectServer(id) {
       console.error('[ToolHub] 连接失败:', await resp.text());
     }
   } catch (err) {
-    // 后端 API 不可用时，维持本地状态（兼容开发模式）
-    console.warn('[ToolHub] 后端连接 API 不可用，使用本地状态:', err.message);
-    server.status = 'connected';
+    // 后端 API 不可用时保持错误状态，避免误导用户
+    console.warn('[ToolHub] 后端连接 API 不可用，无法连接服务器:', err.message);
   }
 }
 
@@ -350,10 +349,14 @@ function discoverServers() {
         }
         alert(`扫描完成，发现了 ${data.servers.length} 个新服务器`);
       } else {
+        // 后端正常响应但无新服务器
         alert('未发现新的 MCP 服务器');
       }
     })
-    .catch(() => alert('网络扫描功能将在 v0.2 中实现'));
+    .catch(err => {
+      console.error('[ToolHub] 网络扫描失败:', err);
+      alert('网络扫描请求失败，请检查后端服务是否可用');
+    });
 }
 </script>
 
