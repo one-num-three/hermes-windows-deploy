@@ -17,7 +17,7 @@ param(
         if ($_ -eq "") { return $true }
         try {
             $pathInfo = [System.IO.Path]::GetFullPath($_)
-            return [System.IO.Path]::IsPathRooted($pathInfo) -and -not [System.IO.Path]::GetInvalidPathChars().Any({$pathInfo.Contains($_)}) -and $pathInfo.Length -le 260
+            return [System.IO.Path]::IsPathRooted($pathInfo) -and -not ($pathInfo.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) -and $pathInfo.Length -le 260
         } catch { return $false }
     })]
     [string]$WslPath = "",      # WSL 安装路径（如 D:\\WSL），留空则默认 C 盘
@@ -97,7 +97,11 @@ function Test-WindowsVersion {
 }
 
 function Test-Virtualization {
-    $cpuInfo = Get-CimInstance Win32_Processor | Select-Object -First 1
+    $cpuInfo = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cpuInfo) {
+        Write-Step "Failed to get CPU info, skip virt check" "warn"
+        return $true
+    }
     $vmSupport = $cpuInfo.VirtualizationFirmwareEnabled
     if (-not $vmSupport) {
         Write-Step "BIOS 虚拟化未开启，WSL2 无法运行" "warn"
@@ -131,12 +135,15 @@ function Test-DiskSpace {
 
 function Test-Memory {
     $totalGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
-    if ($totalGB -lt 8) {
-        Write-Error-And-Log "内存不足: ${totalGB}GB，需要至少 8GB"
+    if ($totalGB -lt 1) {
+        Write-Error-And-Log "内存严重不足: ${totalGB}GB，需要至少 1GB"
         return $false
     }
-    # 配置 WSL 内存限制为总内存的一半
-    $Script:WSL_MEMORY_LIMIT = [math]::Max(2, [math]::Floor($totalGB / 2))
+    if ($totalGB -lt 8) {
+        Write-Step "内存偏低: ${totalGB}GB（建议 8GB），WSL 可能较慢" "warn"
+    }
+    # 配置 WSL 内存限制为总内存的一半，最少 512MB
+    $Script:WSL_MEMORY_LIMIT = [math]::Max(0.5, [math]::Floor($totalGB / 2))
     Write-Step "内存: ${totalGB}GB（WSL 限制: ${Script:WSL_MEMORY_LIMIT}GB）" "ok"
     return $true
 }
@@ -267,10 +274,10 @@ function Step-InstallWsl {
         # WSL2 内核可能未安装，尝试安装
         Write-Step "WSL2 内核未安装，正在下载..." "warn"
         $kernelUrl = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
-        $kernelPath = "$env:TEMP\wsl_update_x64.msi"
+        $kernelPath = "$env:TEMP\\wsl_update_x64.msi"
         try {
             Invoke-WebRequest -Uri $kernelUrl -OutFile $kernelPath -TimeoutSec 300
-            Start-Process msiexec.exe -ArgumentList "/i `"$kernelPath`" /quiet /norestart" -Wait
+            Start-Process msiexec.exe -ArgumentList "/i `\"$kernelPath`\" /quiet /norestart" -Wait
             wsl --set-default-version 2
             # 清理临时文件
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
@@ -278,6 +285,33 @@ function Step-InstallWsl {
             Write-Error-And-Log "WSL2 内核安装失败: $_"
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
             return $false
+        }
+    }
+
+    # 检测 WSL 是否支持 --import（旧版 WSL 不支持）
+    $wslHelp = wsl --help 2>&1 | Out-String
+    if ($wslHelp -notmatch '--import') {
+        Write-Step "WSL 版本过旧，不支持 --import，正在更新 WSL..." "warn"
+        $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
+        $wslMsiPath = "$env:TEMP\\wsl_update.msi"
+        try {
+            Invoke-WebRequest -Uri $wslMsiUrl -OutFile $wslMsiPath -TimeoutSec 600
+            Write-Step "WSL MSI 下载完成，正在安装..." "start"
+            Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
+            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
+            Write-Step "WSL 已更新，需要重启后生效" "warn"
+            Set-InstallState "wsl" "need_reboot"
+            # 注册 RunOnce 自动继续
+            $scriptPath = $MyInvocation.MyCommand.Path
+            $runOnceKey = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+            Set-ItemProperty -Path $runOnceKey -Name "HermesContinue" -Value "powershell.exe -File `\"$scriptPath`\"" -Force
+            Write-Step "已设置重启后自动继续" "ok"
+            shutdown /r /t 30 /c "WSL 更新需要重启，30 秒后自动重启..."
+            exit 0
+        } catch {
+            Write-Error-And-Log "WSL 更新失败: $_"
+            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
+            Write-Step "将继续尝试安装，但 --import 可能不可用" "warn"
         }
     }
 
@@ -336,12 +370,12 @@ function Step-InstallUbuntu {
         }
         Write-Step "目标磁盘可用空间: ${targetFreeGB}GB" "ok"
 
-        # 下载 Ubuntu rootfs
-        $rootfsUrl = "https://cloud-images.ubuntu.com/wsl/noble/current/ubuntu-noble-wsl-amd64-rootfs.tar.gz"
-        $rootfsFile = "$env:TEMP\ubuntu-rootfs.tar.gz"
+        # 下载 Ubuntu rootfs (WSL image)
+        $rootfsUrl = "https://cdimages.ubuntu.com/ubuntu-wsl/noble/daily-live/current/noble-wsl-amd64.wsl"
+        $rootfsFile = "$env:TEMP\ubuntu-noble-wsl-amd64.wsl"
         $distroPath = Join-Path $wslDir $Script:WSL_DISTRO
 
-        Write-Step "下载 Ubuntu 24.04 rootfs（约 500MB）..." "start"
+        Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB）..." "start"
         try {
             Invoke-WebRequest -Uri $rootfsUrl -OutFile $rootfsFile -TimeoutSec 600
             Write-Step "下载完成" "ok"
@@ -419,14 +453,16 @@ function Step-BootstrapWsl {
         $userB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_USER))
         $passB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_PASSWORD))
 
-        $createOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c "
-            USER_B64='$userB64'; PASS_B64='$passB64'
-            WSL_USER=\$(echo \"\$USER_B64\" | base64 -d)
-            WSL_PASS=\$(echo \"\$PASS_B64\" | base64 -d)
-            useradd -m -s /bin/bash \"\$WSL_USER\"
-            echo \"\$WSL_USER:\$WSL_PASS\" | chpasswd
-            echo \"\$WSL_USER ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/\"\$WSL_USER\"
-        " 2>&1
+        $bashCmd = @'
+USER_B64='__UB64__'; PASS_B64='__PB64__'
+WSL_USER=$(echo "$USER_B64" | base64 -d)
+WSL_PASS=$(echo "$PASS_B64" | base64 -d)
+useradd -m -s /bin/bash "$WSL_USER"
+echo "$WSL_USER:$WSL_PASS" | chpasswd
+echo "$WSL_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$WSL_USER"
+'@
+        $bashCmd = $bashCmd.Replace('__UB64__', $userB64).Replace('__PB64__', $passB64)
+        $createOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c $bashCmd 2>&1
         $exitCode = $LASTEXITCODE
         $createOutput | Out-File $LogPath -Append
 
@@ -478,13 +514,13 @@ function Step-InstallHermes {
     }
 
     # 构造 WSL 内安装命令（全部从自建 CDN 下载，零外部依赖）
-    $installScript = @"
+    $installScript = @'
 #!/bin/bash
 set -e
 
 echo "[Hermes] 开始安装..."
-export HOME=/home/$Script:WSL_USER
-CDN="$($Script:CDN_BASE)"
+export HOME=/home/__USER__
+CDN="__CDN__"
 
 # 安装基础依赖（apt 走清华镜像，已在 setup-mirrors.sh 中配置）
 sudo apt-get update -qq
@@ -492,11 +528,11 @@ sudo apt-get install -y -qq python3 python3-pip python3-venv curl
 
 # 从 CDN 下载安装脚本并执行（HTTPS 校验签名）
 echo "[Hermes] 从 CDN 下载安装脚本..."
-curl -fsSL "\$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
+curl -fsSL "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
 # 下载 SHA256 校验文件
 echo "[Hermes] 验证文件完整性..."
-curl -fsSL "\$CDN/files.sha256" -o /tmp/files.sha256
+curl -fsSL "$CDN/files.sha256" -o /tmp/files.sha256
 if ! grep -q "hermes-install-standalone.sh" /tmp/files.sha256; then
     echo "[Hermes] 校验文件无效，中止安装"
     exit 1
@@ -509,9 +545,9 @@ if command -v sha256sum &>/dev/null; then
         exit 1
     fi
 elif command -v openssl &>/dev/null; then
-    FILE_HASH=\$(openssl dgst -sha256 /tmp/hermes-install.sh | awk '{print \$NF}')
-    EXPECTED_HASH=\$(grep 'hermes-install-standalone.sh' /tmp/files.sha256 | awk '{print \$1}')
-    if [ "\$FILE_HASH" != "\$EXPECTED_HASH" ]; then
+    FILE_HASH=$(openssl dgst -sha256 /tmp/hermes-install.sh | awk '{print $NF}')
+    EXPECTED_HASH=$(grep 'hermes-install-standalone.sh' /tmp/files.sha256 | awk '{print $1}')
+    if [ "$FILE_HASH" != "$EXPECTED_HASH" ]; then
         echo "[Hermes] 文件校验失败！sha256 不匹配"
         exit 1
     fi
@@ -523,7 +559,8 @@ echo "[Hermes] 校验通过"
 bash /tmp/hermes-install.sh
 
 echo "[Hermes] Done."
-"@
+'@
+    $installScript = $installScript.Replace('__USER__', $Script:WSL_USER).Replace('__CDN__', $Script:CDN_BASE)
 
     $hermesOutput = $installScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
     $exitCode = $LASTEXITCODE
@@ -549,25 +586,26 @@ function Step-InstallWebUi {
         return $true
     }
 
-    $webUiScript = @"
+    $webUiScript = @'
 #!/bin/bash
 set -e
-export HOME=/home/$Script:WSL_USER
-export NVM_DIR="\$HOME/.nvm"
-CDN="$($Script:CDN_BASE)"
+export HOME=/home/__USER__
+export NVM_DIR="$HOME/.nvm"
+CDN="__CDN__"
 
 echo "[WebUI] 安装 Node.js..."
-curl -fsSL "\$CDN/setup-node22.x" | sudo -E bash -
+curl -fsSL "$CDN/setup-node22.x" | sudo -E bash -
 sudo apt-get install -y nodejs
 
 echo "[WebUI] 配置 npm 镜像..."
-npm config set registry $($Script:MIRRORS['npm'])
+npm config set registry __MIRROR__
 
 echo "[WebUI] 安装 hermes-web-ui..."
 npm install -g hermes-web-ui
 
 echo "[WebUI] Done."
-"@
+'@
+    $webUiScript = $webUiScript.Replace('__USER__', $Script:WSL_USER).Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
 
     $webUiOutput = $webUiScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
     $exitCode = $LASTEXITCODE
@@ -781,7 +819,7 @@ function Main {
 
     # 根据参数跳过步骤
     if ($SkipWsl) {
-        $steps = $steps | Where-Object { $_.Name -ne "wsl" -and $_.Name -ne "ubuntu" }
+        $steps = $steps | Where-Object { $_.Name -notin @("wsl","ubuntu","bootstrap","hermes","webui","integrate","autostart") }
     }
 
     $failedSteps = @()

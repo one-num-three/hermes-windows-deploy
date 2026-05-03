@@ -78,28 +78,48 @@ hermes-windows-deploy/
 
 ## 系统要求
 
-- Windows 10 2004+ 或 Windows 11
+- Windows 10 2004+ / Windows 11 / Windows Server 2022
 - 64 位操作系统
-- 8GB+ 内存
+- **建议** 8GB+ 内存（最低 2GB，WSL 会以 512MB 运行）
 - 5GB+ 可用磁盘空间
 - BIOS 虚拟化已启用（Intel VT-x / AMD-V）
+- 互联网连接
+
+> **注意**: 低于 8GB 内存时脚本会警告但不阻断。在 2GB 云服务器上经过实测，脚本可完整运行，但 WSL + Ubuntu + Hermes 运行会受限。
+
+## 自建 CDN 加速
+
+为国内用户提供全量依赖加速，所有大文件均托管在自建 CDN：
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `hermes-agent.tar.gz` | 73 MB | Hermes Agent 主程序 |
+| `wsl.2.6.3.0.x64.msi` | 236 MB | WSL 完整安装包（兼容旧版 Windows Server） |
+| `wsl_update_x64.msi` | 17 MB | WSL2 内核更新 |
+
+> CDN 地址: `http://121.40.165.216/hermes-cdn/files/`  
+> 详见 [docs/依赖清单.md](docs/依赖清单.md)
 
 ## 安装选项
 
 ```powershell
-# 无人值守安装
+# 无人值守安装（推荐）
 .\scripts\install-hermes.ps1 -Unattended
 
 # 自定义端口
 .\scripts\install-hermes.ps1 -Port 9000
 
-# 使用 Gitee 镜像（替代 GitHub）
-.\scripts\install-hermes.ps1 -MirrorGitee
+# 自定义 WSL 安装路径（绕过 Microsoft Store，适用于 Server 或离线环境）
+.\scripts\install-hermes.ps1 -WslPath D:\WSL
+
+# 跳过 WSL/Ubuntu（已安装时使用）
+.\scripts\install-hermes.ps1 -SkipWsl
+
+# 完整参数
+.\scripts\install-hermes.ps1 -Unattended -Port 8648 -WslPath D:\WSL -UbuntuUser hermes
 ```
 
 ## 环境检测
-
-安装前先检查环境是否满足要求：
 
 ```powershell
 .\scripts\utils\test-env.ps1
@@ -114,6 +134,32 @@ hermes-windows-deploy/
 # 同时移除 WSL Ubuntu 发行版
 .\scripts\uninstall.ps1 -RemoveWsl
 ```
+
+## 实机测试
+
+2026-05-03 在阿里云 Windows Server 2022 (2GB/1vCPU) 实机上完成全流程测试：
+
+- ✅ 脚本解析无崩溃
+- ✅ 7 个步骤全部执行
+- ✅ 环境检测、磁盘/内存/端口/WSL 状态正确
+- ✅ WSL 旧版自动检测 + CDN 更新逻辑就绪
+- ✅ Ubuntu 376MB rootfs 成功下载（自定义路径模式）
+- ⚠️ WSL 需更新后重启才能完成 Ubuntu 导入（云实例限制）
+
+详见 [docs/实机测试报告.md](docs/实机测试报告.md)
+
+## 已修复问题（R8 实测轮次）
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| 1 | 中 | `Get-CimInstance Win32_Processor` 云 VM 返回 null | null 检查 + 优雅降级 |
+| 2 | 高 | UTF-8 无 BOM → 中文 Windows GBK 乱码 | 传输前加 BOM |
+| 3 | 中 | `-SkipWsl` 跳过不完整 | 扩展到全部 WSL 步骤 |
+| 4 | **高** | `\$` 在 PS 双引号中不是转义符 | `@'...'@` + `.Replace()` |
+| 5 | 中 | `-f` 格式化与 awk `{}` 冲突 | 改 `.Replace()` |
+| 6 | 中 | `.Any(...)` LINQ 不兼容 PS | 改 `IndexOfAny()` |
+| 7 | 中 | Ubuntu rootfs URL 迁移 | 更新 cdimages 地址 |
+| 8 | **高** | 旧版 WSL 不支持 `--import` | 自动检测 + CDN 下载安装 WSL MSI |
 
 ## 常见问题
 

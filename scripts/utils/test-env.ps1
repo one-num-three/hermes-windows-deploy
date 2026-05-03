@@ -41,9 +41,14 @@ Test-Item "64 位系统" { [Environment]::Is64BitOperatingSystem }
 # 硬件信息
 Write-Host ""
 Write-Host "硬件信息:" -ForegroundColor White
-$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-Test-Item "CPU: $($cpu.Name.Trim())" { $true }
-Test-Item "虚拟化已启用" { $cpu.VirtualizationFirmwareEnabled }
+$cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cpu) {
+    Test-Item "CPU: $($cpu.Name.Trim())" { $true }
+    Test-Item "Virtualization" { $cpu.VirtualizationFirmwareEnabled }
+} else {
+    Test-Item "CPU: Unavailable" { $true }
+    Test-Item "Virtualization" { $false }
+}
 $totalMem = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
 Test-Item "内存: ${totalMem}GB (需要 >= 8GB)" { $totalMem -ge 8 }
 $freeDisk = [math]::Round((Get-PSDrive -Name C).Free / 1GB, 1)
