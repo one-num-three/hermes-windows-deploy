@@ -605,7 +605,7 @@ sudo apt-get install -y python3 python3-pip python3-venv curl
 
 echo "[Hermes] ===== Step 4/5: 从 CDN 下载安装脚本 ====="
 CDN="__CDN__"
-curl -fsSL "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
+curl -fSL --progress-bar "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
 echo "[Hermes] ===== Step 5/5: 执行安装 ====="
 bash /tmp/hermes-install.sh
@@ -616,7 +616,10 @@ echo "[Hermes] ===== 安装完成 ====="
 
     Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
     $hermesLog = "$env:TEMP\hermes-wsl-install.log"
-    $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | Tee-Object -FilePath $hermesLog
+    $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | ForEach-Object {
+        Write-Host "  $_"
+        Add-Content -Path $hermesLog -Value $_
+    }
     $exitCode = $LASTEXITCODE
     $hermesOutput = Get-Content $hermesLog -Raw
     $hermesOutput | Out-File $LogPath -Append
@@ -646,30 +649,36 @@ function Step-InstallWebUi {
     $webUiScript = @'
 #!/bin/bash
 set -e
-export HOME=/home/__USER__
-export NVM_DIR="$HOME/.nvm"
-CDN="__CDN__"
 
-echo "[WebUI] 安装 Node.js..."
-curl -fsSL "$CDN/setup-node22.x" | sudo -E bash -
+echo "[WebUI] ===== Step 1/3: 安装 Node.js (通过 CDN) ====="
+CDN="__CDN__"
+curl -fSL --progress-bar "$CDN/setup-node22.x" | sudo -E bash -
 sudo apt-get install -y nodejs
 
-echo "[WebUI] 配置 npm 镜像..."
+echo "[WebUI] ===== Step 2/3: 配置 npm 镜像 ====="
 npm config set registry __MIRROR__
 
-echo "[WebUI] 安装 hermes-web-ui..."
+echo "[WebUI] ===== Step 3/3: 安装 hermes-web-ui ====="
 npm install -g hermes-web-ui
 
-echo "[WebUI] Done."
+echo "[WebUI] ===== Done ====="
 '@
-    $webUiScript = $webUiScript.Replace('__USER__', $Script:WSL_USER).Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
+    $webUiScript = $webUiScript.Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
 
-    $webUiOutput = $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
+    Write-Step "正在 WSL 内安装 Web UI (约 2-5 分钟)..." "start"
+    $webUiLog = "$env:TEMP\hermes-webui-install.log"
+    $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | ForEach-Object {
+        Write-Host "  $_"
+        Add-Content -Path $webUiLog -Value $_
+    }
     $exitCode = $LASTEXITCODE
+    $webUiOutput = Get-Content $webUiLog -Raw
     $webUiOutput | Out-File $LogPath -Append
 
     if ($exitCode -ne 0) {
-        Write-Error-And-Log "hermes-web-ui 安装失败"
+        Write-Error-And-Log "hermes-web-ui 安装失败 (退出码: $exitCode)"
+        Write-Step "WSL 输出 (最后5行):" "info"
+        ($webUiOutput -split "`n")[-5..-1] | ForEach-Object { Write-Step $_ "" }
         return $false
     }
 
