@@ -167,6 +167,13 @@ function Invoke-Download {
         return $true
     }
     
+    # 2. 文件已存在则跳过下载
+    if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 1048576)) {
+        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+        Write-Step "$Description 已存在 (${sizeMB}MB)，跳过下载" "skip"
+        return $true
+    }
+    
     Write-Step "下载 $Description..." "dl"
     Write-Step "来源: $Url" "info"
 
@@ -617,11 +624,12 @@ echo "[Hermes] ===== 安装完成 ====="
 
     Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
     $hermesLog = "$env:TEMP\hermes-wsl-install.log"
-    $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | ForEach-Object {
+    $hermesRaw = $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
+    $exitCode = $LASTEXITCODE  # 必须在管道之前捕获!
+    $hermesRaw | ForEach-Object {
         Write-Host "  $_"
         Add-Content -Path $hermesLog -Value $_
     }
-    $exitCode = $LASTEXITCODE
     $hermesOutput = Get-Content $hermesLog -Raw
     $hermesOutput | Out-File $LogPath -Append
 
@@ -668,11 +676,12 @@ echo "[WebUI] ===== Done ====="
 
     Write-Step "正在 WSL 内安装 Web UI (约 2-5 分钟)..." "start"
     $webUiLog = "$env:TEMP\hermes-webui-install.log"
-    $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | ForEach-Object {
+    $webUiRaw = $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
+    $exitCode = $LASTEXITCODE  # 必须在管道之前捕获!
+    $webUiRaw | ForEach-Object {
         Write-Host "  $_"
         Add-Content -Path $webUiLog -Value $_
     }
-    $exitCode = $LASTEXITCODE
     $webUiOutput = Get-Content $webUiLog -Raw
     $webUiOutput | Out-File $LogPath -Append
 
