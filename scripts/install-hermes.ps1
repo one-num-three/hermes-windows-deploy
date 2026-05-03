@@ -377,18 +377,26 @@ function Step-InstallUbuntu {
         }
         Write-Step "目标磁盘可用空间: ${targetFreeGB}GB" "ok"
 
-        # 下载 Ubuntu rootfs (WSL image)
-        $rootfsUrl = "https://cdimages.ubuntu.com/ubuntu-wsl/noble/daily-live/current/noble-wsl-amd64.wsl"
-        $rootfsFile = "$env:TEMP\ubuntu-noble-wsl-amd64.wsl"
+        # 下载 Ubuntu rootfs (WSL image) — 优先走自建 CDN
+        $rootfsCdnUrl = "$($Script:CDN_BASE)/ubuntu-noble-wsl-amd64.wsl"
+        $rootfsDirectUrl = "https://cdimages.ubuntu.com/ubuntu-wsl/noble/daily-live/current/noble-wsl-amd64.wsl"
+        $rootfsFile = "$env:TEMP\\ubuntu-noble-wsl-amd64.wsl"
         $distroPath = Join-Path $wslDir $Script:WSL_DISTRO
 
-        Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB）..." "start"
+        Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB，优先 CDN）..." "start"
+        $rootfsUrl = $rootfsCdnUrl
         try {
-            Invoke-WebRequest -Uri $rootfsUrl -OutFile $rootfsFile -TimeoutSec 600
-            Write-Step "下载完成" "ok"
+            Invoke-WebRequest -Uri $rootfsCdnUrl -OutFile $rootfsFile -TimeoutSec 120
+            Write-Step "下载完成（CDN）" "ok"
         } catch {
-            Write-Error-And-Log "rootfs 下载失败: $_"
-            return $false
+            Write-Step "CDN 下载失败，回退到官方源..." "warn"
+            try {
+                Invoke-WebRequest -Uri $rootfsDirectUrl -OutFile $rootfsFile -TimeoutSec 600
+                Write-Step "下载完成（官方源）" "ok"
+            } catch {
+                Write-Error-And-Log "rootfs 下载失败: $_"
+                return $false
+            }
         }
 
         # 导入到自定义路径
