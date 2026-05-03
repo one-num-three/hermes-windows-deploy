@@ -591,17 +591,23 @@ function Step-InstallHermes {
 #!/bin/bash
 set -e
 
-echo "[Hermes] ===== Step 1/4: 更新 apt 包列表 ====="
+echo "[Hermes] ===== Step 1/5: 配置国内镜像源 ====="
+sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple 2>/dev/null || true
+git config --global url."https://ghproxy.com/https://github.com/".insteadOf "https://github.com/" 2>/dev/null || true
+
+echo "[Hermes] ===== Step 2/5: 更新 apt 包列表 ====="
 sudo apt-get update
 
-echo "[Hermes] ===== Step 2/4: 安装 Python3 + curl ====="
+echo "[Hermes] ===== Step 3/5: 安装 Python3 + curl ====="
 sudo apt-get install -y python3 python3-pip python3-venv curl
 
-echo "[Hermes] ===== Step 3/4: 从 CDN 下载安装脚本 ====="
+echo "[Hermes] ===== Step 4/5: 从 CDN 下载安装脚本 ====="
 CDN="__CDN__"
 curl -fsSL "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
-echo "[Hermes] ===== Step 4/4: 执行安装 ====="
+echo "[Hermes] ===== Step 5/5: 执行安装 ====="
 bash /tmp/hermes-install.sh
 
 echo "[Hermes] ===== 安装完成 ====="
@@ -609,8 +615,10 @@ echo "[Hermes] ===== 安装完成 ====="
     $installScript = $installScript.Replace('__CDN__', $Script:CDN_BASE)
 
     Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
-    $hermesOutput = ($installScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1 | Tee-Object -Variable hermesLines)
+    $hermesLog = "$env:TEMP\hermes-wsl-install.log"
+    $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1 | Tee-Object -FilePath $hermesLog
     $exitCode = $LASTEXITCODE
+    $hermesOutput = Get-Content $hermesLog -Raw
     $hermesOutput | Out-File $LogPath -Append
 
     if ($exitCode -ne 0) {
@@ -656,7 +664,7 @@ echo "[WebUI] Done."
 '@
     $webUiScript = $webUiScript.Replace('__USER__', $Script:WSL_USER).Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
 
-    $webUiOutput = $webUiScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
+    $webUiOutput = $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
     $exitCode = $LASTEXITCODE
     $webUiOutput | Out-File $LogPath -Append
 
