@@ -31,7 +31,7 @@ $Script:WSL_DISTRO = "Ubuntu-24.04"
 $Script:WSL_USER = ""
 $Script:WEB_PORT = $Port
 $Script:STATE_FILE = "$([Environment]::GetFolderPath('UserProfile'))\.hermes\install-state.json"
-$Script:CDN_BASE = "https://121.40.165.216/hermes-cdn/files"
+$Script:CDN_BASE = "http://121.40.165.216/hermes-cdn/files"
 $Script:GITHUB_PROXY = "https://ghproxy.com/"  # GitHub 加速代理（备用）
 $Script:HERMES_REPO = "https://github.com/NousResearch/hermes-agent.git"
 $Script:HERMES_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
@@ -265,6 +265,41 @@ function Step-InstallWsl {
         }
     }
 
+    # 检测 WSL 是否支持 --import（旧版 WSL 不支持任何现代功能）
+    # 优先使用新版 WSL（C:\Program Files\WSL\wsl.exe），System32 里可能是旧版
+    $wslExe = "wsl.exe"
+    if (Test-Path "C:\Program Files\WSL\wsl.exe") {
+        $wslExe = "C:\Program Files\WSL\wsl.exe"
+        $env:PATH = "C:\Program Files\WSL;$env:PATH"
+    }
+    # WSL 2.0+ 支持 --import；通过文件版本检测（避免 --help 输出 UTF-16LE 乱码导致匹配失败）
+    $wslVer = (Get-Item $wslExe).VersionInfo.FileVersion
+    $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
+    if (-not $wslSupportsImport) {
+        Write-Step "WSL 版本过旧，不支持 --import，正在从 CDN 下载更新..." "warn"
+        $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
+        $wslMsiPath = "$env:TEMP\\wsl_update.msi"
+        try {
+            Invoke-WebRequest -Uri $wslMsiUrl -OutFile $wslMsiPath -TimeoutSec 900
+            Write-Step "WSL MSI 下载完成，正在安装..." "start"
+            Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
+            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
+            Write-Step "WSL 已更新，需要重启后生效" "warn"
+            Set-InstallState "wsl" "need_reboot"
+            # 注册 RunOnce 自动继续
+            $scriptPath = $MyInvocation.MyCommand.Path
+            $runOnceKey = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+            Set-ItemProperty -Path $runOnceKey -Name "HermesContinue" -Value "powershell.exe -File `\"$scriptPath`\"" -Force
+            Write-Step "已设置重启后自动继续" "ok"
+            shutdown /r /t 30 /c "WSL 更新需要重启，30 秒后自动重启..."
+            exit 0
+        } catch {
+            Write-Error-And-Log "WSL MSI 下载/安装失败: $_"
+            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
+            Write-Step "将继续尝试安装，但 WSL 功能可能受限" "warn"
+        }
+    }
+
     # 设置 WSL 默认版本为 2
     $exitCode = 0
     $wslOutput = wsl --set-default-version 2 2>&1
@@ -282,36 +317,8 @@ function Step-InstallWsl {
             # 清理临时文件
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
         } catch {
-            Write-Error-And-Log "WSL2 内核安装失败: $_"
+            Write-Step "WSL2 内核安装失败（非致命），继续..." "warn"
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
-            return $false
-        }
-    }
-
-    # 检测 WSL 是否支持 --import（旧版 WSL 不支持）
-    $wslHelp = wsl --help 2>&1 | Out-String
-    if ($wslHelp -notmatch '--import') {
-        Write-Step "WSL 版本过旧，不支持 --import，正在更新 WSL..." "warn"
-        $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
-        $wslMsiPath = "$env:TEMP\\wsl_update.msi"
-        try {
-            Invoke-WebRequest -Uri $wslMsiUrl -OutFile $wslMsiPath -TimeoutSec 600
-            Write-Step "WSL MSI 下载完成，正在安装..." "start"
-            Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
-            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
-            Write-Step "WSL 已更新，需要重启后生效" "warn"
-            Set-InstallState "wsl" "need_reboot"
-            # 注册 RunOnce 自动继续
-            $scriptPath = $MyInvocation.MyCommand.Path
-            $runOnceKey = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
-            Set-ItemProperty -Path $runOnceKey -Name "HermesContinue" -Value "powershell.exe -File `\"$scriptPath`\"" -Force
-            Write-Step "已设置重启后自动继续" "ok"
-            shutdown /r /t 30 /c "WSL 更新需要重启，30 秒后自动重启..."
-            exit 0
-        } catch {
-            Write-Error-And-Log "WSL 更新失败: $_"
-            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
-            Write-Step "将继续尝试安装，但 --import 可能不可用" "warn"
         }
     }
 
