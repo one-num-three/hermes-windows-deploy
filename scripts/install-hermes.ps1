@@ -148,6 +148,41 @@ function Test-Memory {
     return $true
 }
 
+function Invoke-Download {
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [string]$Description = "文件",
+        [int]$TimeoutSec = 600
+    )
+    Write-Step "下载 $Description..." "dl"
+    Write-Step "来源: $Url" "info"
+
+    # 优先用 curl.exe（Win10 1803+ 自带，显示进度条+网速）
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        $proc = Start-Process -FilePath "curl.exe" -ArgumentList "-L", "-o", "`"$OutFile`"", "--progress-bar", "--connect-timeout", "15", "--max-time", "$TimeoutSec", "`"$Url`"" -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -eq 0 -and (Test-Path $OutFile)) {
+            $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+            Write-Step "$Description 下载完成 (${sizeMB}MB)" "ok"
+            return $true
+        }
+        Write-Step "curl 下载失败 (exit=$($proc.ExitCode))，回退 PowerShell..." "warn"
+    }
+
+    # 回退: Invoke-WebRequest（静默）
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec
+        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
+        Write-Step "$Description 下载完成 (${sizeMB}MB)" "ok"
+        return $true
+    } catch {
+        Write-Step "$Description 下载失败: $_" "error"
+        return $false
+    }
+}
+
 function Invoke-WithRetry {
     param(
         [ScriptBlock]$Command,
@@ -289,7 +324,7 @@ function Step-InstallWsl {
         $wslMsiPath = "$env:TEMP\\wsl_update.msi"
         try {
             Write-Step "从 CDN 下载 WSL MSI (236MB): $wslMsiUrl" "info"
-            Invoke-WebRequest -Uri $wslMsiUrl -OutFile $wslMsiPath -TimeoutSec 900
+            Invoke-Download -Url $wslMsiUrl -OutFile $wslMsiPath -Description "WSL MSI" -TimeoutSec 900
             $msiSizeMB = [math]::Round((Get-Item $wslMsiPath).Length / 1MB, 1)
             Write-Step "WSL MSI 下载完成 (${msiSizeMB}MB)，正在安装..." "start"
             Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
@@ -322,7 +357,7 @@ function Step-InstallWsl {
         $kernelPath = "$env:TEMP\\wsl_update_x64.msi"
         try {
             Write-Step "下载 WSL 内核更新..." "info"
-            Invoke-WebRequest -Uri $kernelUrl -OutFile $kernelPath -TimeoutSec 300
+            Invoke-Download -Url $kernelUrl -OutFile $kernelPath -Description "WSL 内核" -TimeoutSec 300
             Write-Step "安装 WSL 内核..." "start"
             Start-Process msiexec.exe -ArgumentList "/i `\"$kernelPath`\" /quiet /norestart" -Wait
             wsl --set-default-version 2
@@ -400,16 +435,12 @@ function Step-InstallUbuntu {
 
         Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB，优先 CDN）..." "start"
         $rootfsUrl = $rootfsCdnUrl
-        try {
-            Invoke-WebRequest -Uri $rootfsCdnUrl -OutFile $rootfsFile -TimeoutSec 120
-            Write-Step "下载完成（CDN）" "ok"
-        } catch {
+        if (Invoke-Download -Url $rootfsCdnUrl -OutFile $rootfsFile -Description "Ubuntu WSL (CDN)" -TimeoutSec 180) {
+            # CDN 成功
+        } else {
             Write-Step "CDN 下载失败，回退到官方源..." "warn"
-            try {
-                Invoke-WebRequest -Uri $rootfsDirectUrl -OutFile $rootfsFile -TimeoutSec 600
-                Write-Step "下载完成（官方源）" "ok"
-            } catch {
-                Write-Error-And-Log "rootfs 下载失败: $_"
+            if (-not (Invoke-Download -Url $rootfsDirectUrl -OutFile $rootfsFile -Description "Ubuntu WSL (官方)" -TimeoutSec 900)) {
+                Write-Error-And-Log "rootfs 下载失败"
                 return $false
             }
         }
