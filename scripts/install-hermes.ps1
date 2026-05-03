@@ -591,56 +591,32 @@ function Step-InstallHermes {
 #!/bin/bash
 set -e
 
-echo "[Hermes] 开始安装..."
-export HOME=/home/__USER__
+echo "[Hermes] ===== Step 1/4: 更新 apt 包列表 ====="
+sudo apt-get update
+
+echo "[Hermes] ===== Step 2/4: 安装 Python3 + curl ====="
+sudo apt-get install -y python3 python3-pip python3-venv curl
+
+echo "[Hermes] ===== Step 3/4: 从 CDN 下载安装脚本 ====="
 CDN="__CDN__"
-
-# 安装基础依赖（apt 走清华镜像，已在 setup-mirrors.sh 中配置）
-sudo apt-get update -qq
-sudo apt-get install -y -qq python3 python3-pip python3-venv curl
-
-# 从 CDN 下载安装脚本并执行（HTTPS 校验签名）
-echo "[Hermes] 从 CDN 下载安装脚本..."
 curl -fsSL "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
-# 下载 SHA256 校验文件
-echo "[Hermes] 验证文件完整性..."
-curl -fsSL "$CDN/files.sha256" -o /tmp/files.sha256
-if ! grep -q "hermes-install-standalone.sh" /tmp/files.sha256; then
-    echo "[Hermes] 校验文件无效，中止安装"
-    exit 1
-fi
-
-# 验证 SHA256 校验和（回退到 openssl/shasum 如果没有 sha256sum）
-if command -v sha256sum &>/dev/null; then
-    if ! sha256sum -c /tmp/files.sha256 --ignore-missing 2>/dev/null; then
-        echo "[Hermes] 文件校验失败！可能被篡改或下载损坏"
-        exit 1
-    fi
-elif command -v openssl &>/dev/null; then
-    FILE_HASH=$(openssl dgst -sha256 /tmp/hermes-install.sh | awk '{print $NF}')
-    EXPECTED_HASH=$(grep 'hermes-install-standalone.sh' /tmp/files.sha256 | awk '{print $1}')
-    if [ "$FILE_HASH" != "$EXPECTED_HASH" ]; then
-        echo "[Hermes] 文件校验失败！sha256 不匹配"
-        exit 1
-    fi
-else
-    echo "[Hermes] 警告：无 sha256sum 或 openssl，跳过校验"
-fi
-echo "[Hermes] 校验通过"
-
+echo "[Hermes] ===== Step 4/4: 执行安装 ====="
 bash /tmp/hermes-install.sh
 
-echo "[Hermes] Done."
+echo "[Hermes] ===== 安装完成 ====="
 '@
-    $installScript = $installScript.Replace('__USER__', $Script:WSL_USER).Replace('__CDN__', $Script:CDN_BASE)
+    $installScript = $installScript.Replace('__CDN__', $Script:CDN_BASE)
 
-    $hermesOutput = $installScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1
+    Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
+    $hermesOutput = ($installScript | wsl -d $Script:WSL_DISTRO -u $Script:WSL_USER -- bash -s 2>&1 | Tee-Object -Variable hermesLines)
     $exitCode = $LASTEXITCODE
     $hermesOutput | Out-File $LogPath -Append
 
     if ($exitCode -ne 0) {
-        Write-Error-And-Log "Hermes 安装失败"
+        Write-Error-And-Log "Hermes 安装失败 (退出码: $exitCode)"
+        Write-Step "WSL 输出 (最后5行):" "info"
+        ($hermesOutput -split "`n")[-5..-1] | ForEach-Object { Write-Step $_ "" }
         return $false
     }
 
