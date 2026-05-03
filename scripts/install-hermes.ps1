@@ -154,7 +154,8 @@ function Invoke-Download {
         [string]$Url,
         [string]$OutFile,
         [string]$Description = "文件",
-        [int]$TimeoutSec = 600
+        [int]$TimeoutSec = 600,
+        [long]$ExpectedSize = 0
     )
     
     # 1. 本地缓存优先
@@ -167,11 +168,17 @@ function Invoke-Download {
         return $true
     }
     
-    # 2. 文件已存在则跳过下载
-    if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 1048576)) {
-        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
-        Write-Step "$Description 已存在 (${sizeMB}MB)，跳过下载" "skip"
-        return $true
+    # 2. 文件已存在且完整则跳过下载
+    if (Test-Path $OutFile) {
+        $existingSize = (Get-Item $OutFile).Length
+        if ($ExpectedSize -gt 0 -and $existingSize -lt $ExpectedSize) {
+            Write-Step "$Description 文件不完整 (${existingSize}B / ${ExpectedSize}B)，重新下载..." "warn"
+            Remove-Item $OutFile -Force
+        } elseif ($existingSize -gt 1048576) {
+            $sizeMB = [math]::Round($existingSize / 1MB, 1)
+            Write-Step "$Description 已存在 (${sizeMB}MB)，跳过下载" "skip"
+            return $true
+        }
     }
     
     Write-Step "下载 $Description..." "dl"
@@ -389,22 +396,17 @@ function Step-InstallWsl {
         }
     }
 
-    # 配置 .wslconfig（使用 MB 整数值，避免小数点在不同区域设置下变成逗号）
+    # 配置 .wslconfig（始终覆盖，避免旧版损坏文件导致 WSL 无法启动）
     $wslMemMB = [math]::Max(512, [math]::Floor($Script:WSL_MEMORY_LIMIT * 1024))
     $wslConfig = @"
 [wsl2]
 memory=${wslMemMB}MB
 processors=2
-swap=2048MB
 networkingMode=mirrored
 "@
     $wslConfigPath = "$env:USERPROFILE\.wslconfig"
-    if (-not (Test-Path $wslConfigPath)) {
-        Set-Content -Path $wslConfigPath -Value $wslConfig -Encoding ASCII
-        Write-Step ".wslconfig 已配置（mirrored 网络模式，内存 ${wslMemMB}MB）" "ok"
-    } else {
-        Write-Step ".wslconfig 已存在，跳过" "skip"
-    }
+    Set-Content -Path $wslConfigPath -Value $wslConfig -Encoding ASCII -Force
+    Write-Step ".wslconfig 已配置（内存 ${wslMemMB}MB，mirrored 网络）" "ok"
 
     Set-InstallState "wsl" "done"
     Write-Step "WSL2 就绪 ✓" "ok"
@@ -447,6 +449,15 @@ function Step-InstallUbuntu {
         }
         Write-Step "目标磁盘可用空间: ${targetFreeGB}GB" "ok"
 
+        # 先检查是否已安装 Ubuntu（直接尝试运行，不依赖 wsl -l -q 的编码输出）
+        $testUbuntu = wsl -d $Script:WSL_DISTRO -- echo "ok" 2>&1
+        if ($LASTEXITCODE -eq 0 -and $testUbuntu -match "ok") {
+            Write-Step "Ubuntu 24.04 已安装，跳过" "skip"
+            Set-InstallState "ubuntu" "done"
+            Write-Step "Ubuntu 24.04 就绪" "ok"
+            return $true
+        }
+
         # 下载 Ubuntu rootfs (WSL image) — 优先走自建 CDN
         $rootfsCdnUrl = "$($Script:CDN_BASE)/ubuntu-noble-wsl-amd64.wsl"
         $rootfsDirectUrl = "https://cdimages.ubuntu.com/ubuntu-wsl/noble/daily-live/current/noble-wsl-amd64.wsl"
@@ -454,12 +465,11 @@ function Step-InstallUbuntu {
         $distroPath = Join-Path $wslDir $Script:WSL_DISTRO
 
         Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB，优先 CDN）..." "start"
-        $rootfsUrl = $rootfsCdnUrl
-        if (Invoke-Download -Url $rootfsCdnUrl -OutFile $rootfsFile -Description "Ubuntu WSL (CDN)" -TimeoutSec 180) {
+        if (Invoke-Download -Url $rootfsCdnUrl -OutFile $rootfsFile -Description "Ubuntu WSL (CDN)" -TimeoutSec 180 -ExpectedSize 380000000) {
             # CDN 成功
         } else {
             Write-Step "CDN 下载失败，回退到官方源..." "warn"
-            if (-not (Invoke-Download -Url $rootfsDirectUrl -OutFile $rootfsFile -Description "Ubuntu WSL (官方)" -TimeoutSec 900)) {
+            if (-not (Invoke-Download -Url $rootfsDirectUrl -OutFile $rootfsFile -Description "Ubuntu WSL (官方)" -TimeoutSec 900 -ExpectedSize 380000000)) {
                 Write-Error-And-Log "rootfs 下载失败"
                 return $false
             }
@@ -468,9 +478,12 @@ function Step-InstallUbuntu {
         # 导入到自定义路径
         Write-Step "导入 Ubuntu 到 $distroPath..." "start"
         try {
-            wsl --import $Script:WSL_DISTRO $distroPath $rootfsFile --version 2 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error-And-Log "WSL 导入失败"
+            $importOutput = wsl --import $Script:WSL_DISTRO $distroPath $rootfsFile --version 2 2>&1
+            $importExit = $LASTEXITCODE
+            if ($importExit -ne 0) {
+                Write-Error-And-Log "WSL 导入失败 (退出码: $importExit)"
+                if ($importOutput) { Write-Step "输出: $importOutput" "error" }
+                Remove-Item $rootfsFile -Force -ErrorAction SilentlyContinue
                 return $false
             }
             Remove-Item $rootfsFile -Force -ErrorAction SilentlyContinue
@@ -594,6 +607,14 @@ function Step-InstallHermes {
         return $true
     }
 
+    # 检查 Hermes 是否已装（wrapper 文件存在即可）
+    $hermesCheck = wsl -d $Script:WSL_DISTRO -u root -- bash -c "test -f /usr/local/bin/hermes && echo INSTALLED" 2>&1
+    if ($LASTEXITCODE -eq 0 -and $hermesCheck -match 'INSTALLED') {
+        Write-Step "Hermes Agent 已安装" "skip"
+        Set-InstallState "hermes" "done"
+        return $true
+    }
+
     # 构造 WSL 内安装命令（全部从自建 CDN 下载，零外部依赖）
     $installScript = @'
 #!/bin/bash
@@ -615,21 +636,44 @@ echo "[Hermes] ===== Step 4/5: 从 CDN 下载安装脚本 ====="
 CDN="__CDN__"
 curl -fSL --progress-bar "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
 
-echo "[Hermes] ===== Step 5/5: 执行安装 ====="
-bash /tmp/hermes-install.sh
+echo "[Hermes] ===== Step 5/5: 安装 Hermes 核心 ====="
+# 如果 Python 文件已存在，跳过下载，直接重建 wrapper
+if [ -f /root/.hermes/hermes-agent/hermes ] && head -1 /root/.hermes/hermes-agent/hermes 2>/dev/null | grep -qi 'python'; then
+    echo "[Hermes] 文件已存在，跳过下载"
+else
+    echo "[Hermes] 下载解压 hermes-agent.tar.gz..."
+    mkdir -p /root/.hermes
+    curl -fSL --retry 3 --retry-delay 5 --progress-bar "$CDN/hermes-agent.tar.gz" -o /tmp/hermes-agent.tar.gz
+    tar xzf /tmp/hermes-agent.tar.gz -C /root/.hermes/
+    rm /tmp/hermes-agent.tar.gz
+    bash /tmp/hermes-install.sh
+fi
+
+echo "[Hermes] ===== 确保 hermes 全局可用 ====="
+rm -f /usr/local/bin/hermes
+cat > /usr/local/bin/hermes << 'EOF'
+#!/bin/bash
+cd /root/.hermes/hermes-agent
+source venv/bin/activate 2>/dev/null
+exec python3 /root/.hermes/hermes-agent/hermes "$@"
+EOF
+chmod +x /usr/local/bin/hermes
+echo "[Hermes] hermes 已安装到 /usr/local/bin/hermes"
 
 echo "[Hermes] ===== 安装完成 ====="
 '@
     $installScript = $installScript.Replace('__CDN__', $Script:CDN_BASE)
 
     Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
+    $wslExe = if (Test-Path "C:\Program Files\WSL\wsl.exe") { "C:\Program Files\WSL\wsl.exe" } else { "wsl.exe" }
     $hermesLog = "$env:TEMP\hermes-wsl-install.log"
-    $hermesRaw = $installScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
-    $exitCode = $LASTEXITCODE  # 必须在管道之前捕获!
-    $hermesRaw | ForEach-Object {
-        Write-Host "  $_"
-        Add-Content -Path $hermesLog -Value $_
-    }
+    # 写入 Windows 临时文件，通过 /mnt/c/ 路径在 WSL 中执行
+    $sh = "$env:TEMP\hermes-install.sh"
+    Set-Content -Path $sh -Value $installScript -Encoding ASCII -Force
+    $wslPath = ($sh -replace '\\','/' -replace 'C:','/mnt/c')
+    $hermesRaw = & $wslExe -d $Script:WSL_DISTRO -u root -- bash $wslPath 2>&1
+    $exitCode = $LASTEXITCODE
+    $hermesRaw | ForEach-Object { Write-Host "  $_"; Add-Content -Path $hermesLog -Value $_ }
     $hermesOutput = Get-Content $hermesLog -Raw
     $hermesOutput | Out-File $LogPath -Append
 
@@ -655,6 +699,14 @@ function Step-InstallWebUi {
         return $true
     }
 
+    # 检查 WebUI 是否已装
+    $webUiCheck = wsl -d $Script:WSL_DISTRO -u root -- bash -c "npm list -g hermes-web-ui 2>&1" 2>&1
+    if ($LASTEXITCODE -eq 0 -and $webUiCheck -match 'hermes-web-ui') {
+        Write-Step "hermes-web-ui 已安装" "skip"
+        Set-InstallState "webui" "done"
+        return $true
+    }
+
     $webUiScript = @'
 #!/bin/bash
 set -e
@@ -675,13 +727,14 @@ echo "[WebUI] ===== Done ====="
     $webUiScript = $webUiScript.Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
 
     Write-Step "正在 WSL 内安装 Web UI (约 2-5 分钟)..." "start"
+    $wslExe = if (Test-Path "C:\Program Files\WSL\wsl.exe") { "C:\Program Files\WSL\wsl.exe" } else { "wsl.exe" }
     $webUiLog = "$env:TEMP\hermes-webui-install.log"
-    $webUiRaw = $webUiScript | wsl -d $Script:WSL_DISTRO -u root -- bash -s 2>&1
-    $exitCode = $LASTEXITCODE  # 必须在管道之前捕获!
-    $webUiRaw | ForEach-Object {
-        Write-Host "  $_"
-        Add-Content -Path $webUiLog -Value $_
-    }
+    $sh = "$env:TEMP\webui-install.sh"
+    Set-Content -Path $sh -Value $webUiScript -Encoding ASCII -Force
+    $wslPath = ($sh -replace '\\','/' -replace 'C:','/mnt/c')
+    $webUiRaw = & $wslExe -d $Script:WSL_DISTRO -u root -- bash $wslPath 2>&1
+    $exitCode = $LASTEXITCODE
+    $webUiRaw | ForEach-Object { Write-Host "  $_"; Add-Content -Path $webUiLog -Value $_ }
     $webUiOutput = Get-Content $webUiLog -Raw
     $webUiOutput | Out-File $LogPath -Append
 
@@ -796,7 +849,7 @@ function Step-SetupAutoStart {
     $taskName = "HermesAgent-StartWSL"
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if (-not $existingTask) {
-        $action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $Script:WSL_DISTRO -u root -- systemctl start hermes"
+        $action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $Script:WSL_DISTRO -u root -- bash -c 'nohup hermes gateway --port $Script:WEB_PORT > /var/log/hermes.log 2>&1 &'"
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
@@ -824,8 +877,15 @@ function Step-SetupAutoStart {
     $startOutput | Out-File $LogPath -Append
 
     if ($exitCode -ne 0) {
-        Write-Step "systemd 启动失败，WSL 可能未运行 systemd" "warn"
-        Write-Step "请手动运行: wsl -d $Script:WSL_DISTRO -- hermes gateway" "warn"
+        Write-Step "systemd 启动失败，改用后台直接启动..." "warn"
+        $fallback = wsl -d $Script:WSL_DISTRO -u root -- bash -c "nohup hermes gateway --port $Script:WEB_PORT > /var/log/hermes.log 2>&1 & echo PID=\$!" 2>&1
+        $fallbackExit = $LASTEXITCODE
+        $fallback | Out-File $LogPath -Append
+        if ($fallbackExit -eq 0 -and $fallback -match 'PID=') {
+            Write-Step "Hermes 已后台启动" "ok"
+        } else {
+            Write-Step "请手动运行: wsl -d $Script:WSL_DISTRO -- hermes gateway --port $Script:WEB_PORT" "warn"
+        }
     }
 
     Set-InstallState "autostart" "done"
