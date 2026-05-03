@@ -265,17 +265,20 @@ function Step-InstallWsl {
         }
     }
 
-    # 检测 WSL 是否支持 --import（旧版 WSL 不支持任何现代功能）
-    # 优先使用新版 WSL（C:\Program Files\WSL\wsl.exe），System32 里可能是旧版
+    # 检测 WSL 版本（通过 Get-Command 在 PATH 中查找，而非相对路径）
     $wslExe = "wsl.exe"
     if (Test-Path "C:\Program Files\WSL\wsl.exe") {
         $wslExe = "C:\Program Files\WSL\wsl.exe"
         $env:PATH = "C:\Program Files\WSL;$env:PATH"
     }
-    # WSL 2.0+ 支持 --import；通过文件版本检测（避免 --help 输出 UTF-16LE 乱码导致匹配失败）
-    $wslVerRaw = (Get-Item $wslExe).VersionInfo.FileVersion
-    $wslVer = ($wslVerRaw -split ' ')[0]  # 去掉 "(WinBuild...)" 后缀
-    $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
+    $wslCmd = Get-Command $wslExe -ErrorAction SilentlyContinue
+    if ($wslCmd) {
+        $wslVerRaw = (Get-Item $wslCmd.Source).VersionInfo.FileVersion
+        $wslVer = ($wslVerRaw -split ' ')[0]
+        $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
+    } else {
+        $wslSupportsImport = $false
+    }
     if (-not $wslSupportsImport) {
         Write-Step "WSL 版本过旧，不支持 --import，正在从 CDN 下载更新..." "warn"
         $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
