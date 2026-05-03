@@ -382,18 +382,19 @@ function Step-InstallWsl {
         }
     }
 
-    # 配置 .wslconfig
+    # 配置 .wslconfig（使用 MB 整数值，避免小数点在不同区域设置下变成逗号）
+    $wslMemMB = [math]::Max(512, [math]::Floor($Script:WSL_MEMORY_LIMIT * 1024))
     $wslConfig = @"
 [wsl2]
-memory=${Script:WSL_MEMORY_LIMIT}GB
-processors=4
-swap=2GB
+memory=${wslMemMB}MB
+processors=2
+swap=2048MB
 networkingMode=mirrored
 "@
     $wslConfigPath = "$env:USERPROFILE\.wslconfig"
     if (-not (Test-Path $wslConfigPath)) {
-        Set-Content -Path $wslConfigPath -Value $wslConfig
-        Write-Step ".wslconfig 已配置（mirrored 网络模式，内存 ${Script:WSL_MEMORY_LIMIT}GB）" "ok"
+        Set-Content -Path $wslConfigPath -Value $wslConfig -Encoding ASCII
+        Write-Step ".wslconfig 已配置（mirrored 网络模式，内存 ${wslMemMB}MB）" "ok"
     } else {
         Write-Step ".wslconfig 已存在，跳过" "skip"
     }
