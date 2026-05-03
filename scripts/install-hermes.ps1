@@ -244,8 +244,9 @@ function Step-InstallWsl {
 
     $wslCmd = Get-Command wsl.exe -ErrorAction SilentlyContinue
     if (-not $wslCmd) {
-        Write-Step "正在安装 WSL..." "start"
+        Write-Step "WSL 未安装，正在启用 WSL 功能（约 1-3 分钟）..." "start"
         try {
+            Write-Step "执行: wsl --install --no-distribution" "info"
             $wslOutput = wsl --install --no-distribution 2>&1
             $wslOutput | Out-File $LogPath -Append
             Write-Step "WSL 安装完成，请重启电脑后重新运行本脚本" "warn"
@@ -273,10 +274,13 @@ function Step-InstallWsl {
     }
     $wslCmd = Get-Command $wslExe -ErrorAction SilentlyContinue
     if ($wslCmd) {
+        Write-Step "检测到 WSL: $($wslCmd.Source)" "info"
         $wslVerRaw = (Get-Item $wslCmd.Source).VersionInfo.FileVersion
         $wslVer = ($wslVerRaw -split ' ')[0]
         $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
+        Write-Step "WSL 版本: $wslVer (支持 --import: $wslSupportsImport)" "info"
     } else {
+        Write-Step "未找到 wsl.exe" "warn"
         $wslSupportsImport = $false
     }
     if (-not $wslSupportsImport) {
@@ -284,8 +288,10 @@ function Step-InstallWsl {
         $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
         $wslMsiPath = "$env:TEMP\\wsl_update.msi"
         try {
+            Write-Step "从 CDN 下载 WSL MSI (236MB): $wslMsiUrl" "info"
             Invoke-WebRequest -Uri $wslMsiUrl -OutFile $wslMsiPath -TimeoutSec 900
-            Write-Step "WSL MSI 下载完成，正在安装..." "start"
+            $msiSizeMB = [math]::Round((Get-Item $wslMsiPath).Length / 1MB, 1)
+            Write-Step "WSL MSI 下载完成 (${msiSizeMB}MB)，正在安装..." "start"
             Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
             Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
             Write-Step "WSL 已更新，需要重启后生效" "warn"
@@ -315,11 +321,14 @@ function Step-InstallWsl {
         $kernelUrl = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
         $kernelPath = "$env:TEMP\\wsl_update_x64.msi"
         try {
+            Write-Step "下载 WSL 内核更新..." "info"
             Invoke-WebRequest -Uri $kernelUrl -OutFile $kernelPath -TimeoutSec 300
+            Write-Step "安装 WSL 内核..." "start"
             Start-Process msiexec.exe -ArgumentList "/i `\"$kernelPath`\" /quiet /norestart" -Wait
             wsl --set-default-version 2
             # 清理临时文件
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
+            Write-Step "WSL2 内核安装完成" "ok"
         } catch {
             Write-Step "WSL2 内核安装失败（非致命），继续..." "warn"
             Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
@@ -337,11 +346,13 @@ networkingMode=mirrored
     $wslConfigPath = "$env:USERPROFILE\.wslconfig"
     if (-not (Test-Path $wslConfigPath)) {
         Set-Content -Path $wslConfigPath -Value $wslConfig
-        Write-Step ".wslconfig 已配置（mirrored 网络模式）" "ok"
+        Write-Step ".wslconfig 已配置（mirrored 网络模式，内存 ${Script:WSL_MEMORY_LIMIT}GB）" "ok"
+    } else {
+        Write-Step ".wslconfig 已存在，跳过" "skip"
     }
 
     Set-InstallState "wsl" "done"
-    Write-Step "WSL2 就绪" "ok"
+    Write-Step "WSL2 就绪 ✓" "ok"
     return $true
 }
 
