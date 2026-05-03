@@ -32,6 +32,7 @@ $Script:WSL_USER = ""
 $Script:WEB_PORT = $Port
 $Script:STATE_FILE = "$([Environment]::GetFolderPath('UserProfile'))\.hermes\install-state.json"
 $Script:CDN_BASE = "http://121.40.165.216/hermes-cdn/files"
+$Script:LOCAL_CACHE = Join-Path $PSScriptRoot "_cache"  # 本地缓存目录，优先使用
 $Script:GITHUB_PROXY = "https://ghproxy.com/"  # GitHub 加速代理（备用）
 $Script:HERMES_REPO = "https://github.com/NousResearch/hermes-agent.git"
 $Script:HERMES_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
@@ -155,6 +156,17 @@ function Invoke-Download {
         [string]$Description = "文件",
         [int]$TimeoutSec = 600
     )
+    
+    # 1. 本地缓存优先
+    $cacheName = Split-Path $OutFile -Leaf
+    $cachePath = Join-Path $Script:LOCAL_CACHE $cacheName
+    if (Test-Path $cachePath) {
+        $cacheSizeMB = [math]::Round((Get-Item $cachePath).Length / 1MB, 1)
+        Write-Step "使用本地缓存: $cachePath (${cacheSizeMB}MB)" "skip"
+        Copy-Item $cachePath $OutFile -Force
+        return $true
+    }
+    
     Write-Step "下载 $Description..." "dl"
     Write-Step "来源: $Url" "info"
 
