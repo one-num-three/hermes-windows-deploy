@@ -273,7 +273,8 @@ function Step-InstallWsl {
         $env:PATH = "C:\Program Files\WSL;$env:PATH"
     }
     # WSL 2.0+ 支持 --import；通过文件版本检测（避免 --help 输出 UTF-16LE 乱码导致匹配失败）
-    $wslVer = (Get-Item $wslExe).VersionInfo.FileVersion
+    $wslVerRaw = (Get-Item $wslExe).VersionInfo.FileVersion
+    $wslVer = ($wslVerRaw -split ' ')[0]  # 去掉 "(WinBuild...)" 后缀
     $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
     if (-not $wslSupportsImport) {
         Write-Step "WSL 版本过旧，不支持 --import，正在从 CDN 下载更新..." "warn"
