@@ -35,7 +35,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 
-; 签名（可选）
+; 签名（需先申请代码签名证书并配置）
+; 使用方法: iscc /SmyCustomSignTool=$env:SIGNTOOL_PATH hermes-installer.iss
+; 或通过环境变量: $env:SignTool = "signtool.exe sign /fd SHA256 /a /n $env:CERT_SUBJECT /tr http://timestamp.digicert.com /td SHA256 /v `$f"
 ; SignTool=myCustomSignTool
 
 [Languages]
@@ -51,7 +53,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 ; 安装向导程序
 Source: "..\gui\HermesInstaller\bin\Release\net8.0-windows\publish\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\gui\HermesInstaller\bin\Release\net8.0-windows\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\gui\HermesInstaller\bin\Release\net8.0-windows\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
 
 ; 安装脚本
 Source: "..\scripts\install-hermes.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion

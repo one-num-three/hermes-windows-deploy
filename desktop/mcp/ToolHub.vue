@@ -281,13 +281,17 @@ async function connectServer(id) {
   const server = installedServers.value.find(s => s.id === id);
   if (!server) return;
   server.status = 'connecting';
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
   try {
     // 尝试通过后端代理连接 MCP/ACP 服务器
     const resp = await fetch('/api/mcp/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: server.url, protocol: server.url.startsWith('ws') ? 'ws' : 'http' }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     if (resp.ok) {
       server.status = 'connected';
     } else {
@@ -295,7 +299,8 @@ async function connectServer(id) {
       console.error('[ToolHub] 连接失败:', await resp.text());
     }
   } catch (err) {
-    // 后端 API 不可用时保持错误状态，避免误导用户
+    clearTimeout(timeoutId);
+    server.status = 'error';
     console.warn('[ToolHub] 后端连接 API 不可用，无法连接服务器:', err.message);
   }
 }

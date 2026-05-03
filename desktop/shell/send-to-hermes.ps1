@@ -7,6 +7,7 @@ param(
     [string]$FilePath,
 
     [string]$Action = "analyze",
+    [ValidatePattern('^\d{1,5}$')]
     [string]$Port = "8648"
 )
 

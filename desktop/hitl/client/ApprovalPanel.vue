@@ -154,6 +154,11 @@ function connect() {
     console.log(`[Approval] 连接断开，${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)`);
     reconnectTimerId = setTimeout(connect, delay);
   };
+
+  ws.onerror = (e) => {
+    console.error('[Approval] WebSocket 错误:', e);
+    // onerror 后浏览器通常自动触发 onclose，无需额外处理
+  };
 }
 
 function respond(id, decision, reason = '') {

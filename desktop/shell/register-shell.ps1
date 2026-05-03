@@ -3,6 +3,7 @@
 # 用法（管理员 PowerShell）: .\register-shell.ps1 [-Port 8648]
 # =============================================================================
 param(
+    [ValidatePattern('^\d{1,5}$')]
     [string]$Port = "8648",
     [string]$AppName = "Hermes Agent"
 )

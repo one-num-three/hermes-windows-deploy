@@ -8,10 +8,19 @@ param(
     [switch]$Unattended,          # 无人值守模式（跳过所有提示）
     [switch]$SkipWsl,            # 跳过 WSL 安装（已安装时使用）
     [switch]$SkipUbuntu,         # 跳过 Ubuntu 安装
+    [ValidatePattern('^[a-z_][a-z0-9_-]*$')]
     [string]$UbuntuUser = "",    # 手动指定 Ubuntu 用户名（默认自动生成）
+    [ValidatePattern('^\d{1,5}$')]
     [string]$Port = "8648",      # Web UI 端口
     [switch]$MirrorGitee,       # 使用 Gitee 镜像（替代 GitHub）
-    [string]$WslPath = "",      # WSL 安装路径（如 D:\WSL），留空则默认 C 盘
+    [ValidateScript({
+        if ($_ -eq "") { return $true }
+        try {
+            $pathInfo = [System.IO.Path]::GetFullPath($_)
+            return [System.IO.Path]::IsPathRooted($pathInfo) -and -not [System.IO.Path]::GetInvalidPathChars().Any({$pathInfo.Contains($_)}) -and $pathInfo.Length -le 260
+        } catch { return $false }
+    })]
+    [string]$WslPath = "",      # WSL 安装路径（如 D:\\WSL），留空则默认 C 盘
     [string]$LogPath = "$([Environment]::GetFolderPath('UserProfile'))\hermes-install.log"
 )
 
@@ -251,19 +260,23 @@ function Step-InstallWsl {
 
     # 设置 WSL 默认版本为 2
     $exitCode = 0
-    wsl --set-default-version 2 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Null
+    $wslOutput = wsl --set-default-version 2 2>&1
     $exitCode = $LASTEXITCODE
+    $wslOutput | Out-File $LogPath -Append
     if ($exitCode -ne 0) {
         # WSL2 内核可能未安装，尝试安装
         Write-Step "WSL2 内核未安装，正在下载..." "warn"
         $kernelUrl = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
         $kernelPath = "$env:TEMP\wsl_update_x64.msi"
         try {
-            Invoke-WebRequest -Uri $kernelUrl -OutFile $kernelPath
+            Invoke-WebRequest -Uri $kernelUrl -OutFile $kernelPath -TimeoutSec 300
             Start-Process msiexec.exe -ArgumentList "/i `"$kernelPath`" /quiet /norestart" -Wait
             wsl --set-default-version 2
+            # 清理临时文件
+            Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
         } catch {
             Write-Error-And-Log "WSL2 内核安装失败: $_"
+            Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
             return $false
         }
     }
@@ -643,12 +656,17 @@ function Step-SetupAutoStart {
 
     # 创建 systemd 服务
     if (Test-Path (Join-Path $PSScriptRoot "setup-systemd.sh")) {
-        wsl -d $Script:WSL_DISTRO -u root -- bash -c "
+        $sysdOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c "
             export WSL_USER=$Script:WSL_USER
             export WEB_PORT=$Script:WEB_PORT
             bash /tmp/setup-systemd.sh
-        " 2>&1 | Out-File $LogPath -Append
-        Write-Step "systemd 服务已创建" "ok"
+        " 2>&1
+        $sysdOutput | Out-File $LogPath -Append
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step "systemd 服务配置失败 (exit=$LASTEXITCODE)，将尝试 systemctl 直接启动" "warn"
+        } else {
+            Write-Step "systemd 服务已创建" "ok"
+        }
     }
 
     # 添加 Windows 防火墙规则
@@ -677,13 +695,19 @@ function Step-SetupAutoStart {
 
     # 启动服务
     Write-Step "启动 Hermes 服务..." "start"
-    $svcOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl daemon-reload 2>&1
-    $svcOutput | Out-File $LogPath -Append
-    $svcOutput2 = wsl -d $Script:WSL_DISTRO -u root -- systemctl enable hermes 2>&1
-    $svcOutput2 | Out-File $LogPath -Append
-    $svcOutput3 = wsl -d $Script:WSL_DISTRO -u root -- systemctl start hermes 2>&1
+    $reloadOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl daemon-reload 2>&1
+    $reloadOutput | Out-File $LogPath -Append
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "systemctl daemon-reload 失败，继续尝试..." "warn"
+    }
+    $enableOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl enable hermes 2>&1
+    $enableOutput | Out-File $LogPath -Append
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "systemctl enable hermes 失败，继续..." "warn"
+    }
+    $startOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl start hermes 2>&1
     $exitCode = $LASTEXITCODE
-    $svcOutput3 | Out-File $LogPath -Append
+    $startOutput | Out-File $LogPath -Append
 
     if ($exitCode -ne 0) {
         Write-Step "systemd 启动失败，WSL 可能未运行 systemd" "warn"
@@ -810,6 +834,8 @@ function Main {
         Write-Host "  （日常使用不需要密码，仅 sudo/ssh 时需要）" -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "  请自行保管好密码，本脚本不会保存密码到任何文件" -ForegroundColor Yellow
+        # 显示后立即清除内存中的密码
+        Remove-Variable -Name WSL_PASSWORD -Scope Script -ErrorAction SilentlyContinue
     }
     Write-Host "安装日志:    $LogPath" -ForegroundColor DarkGray
     Write-Host ""

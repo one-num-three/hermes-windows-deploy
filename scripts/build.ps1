@@ -183,7 +183,9 @@ function Step-BootstrapInno {
     $innoJob | Wait-Job -Timeout 120 | Out-Null
     if ($innoJob.State -eq 'Running') {
         $innoJob | Stop-Job -PassThru | Remove-Job
-        Write-Step "Inno Setup 安装超时（120s），已终止" "err"
+        # Stop-Job 不终止 Start-Process 启动的子进程，需额外清理
+        Get-Process -Name innosetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Step "Inno Setup 安装超时（120s），已终止进程" "err"
         Remove-Item $installer -Force -ErrorAction SilentlyContinue
         return $false
     }

@@ -4,6 +4,7 @@
 # 用法: .\post-install.ps1 [-Port 8648]
 # =============================================================================
 param(
+    [ValidatePattern('^\d{1,5}$')]
     [string]$Port = "8648",
     [string]$WslDistro = "Ubuntu-24.04"
 )

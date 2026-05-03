@@ -126,7 +126,7 @@ public partial class InstallStep : UserControl
                         var mirrorScript = System.IO.Path.Combine(scriptsDir, "setup-mirrors.sh");
                         if (System.IO.File.Exists(mirrorScript))
                         {
-                            var wslPath = mirrorScript.Replace('\\', '/');
+                            var wslPath = mirrorScript.Replace('\\', '/').Replace("'", "'\\''");
                             var result = await runner.RunInWsl(context.DistroName,
                                 $"bash \"$(wslpath -a '{wslPath}' 2>/dev/null || echo '{wslPath}')\"");
                             LogOutput.Text += $"\n{result.Output}";
@@ -145,7 +145,7 @@ public partial class InstallStep : UserControl
                         var bootstrapScript = System.IO.Path.Combine(scriptsDir, "wsl-bootstrap.sh");
                         if (System.IO.File.Exists(bootstrapScript))
                         {
-                            var wslPath = bootstrapScript.Replace('\\', '/');
+                            var wslPath = bootstrapScript.Replace('\\', '/').Replace("'", "'\\''");
                             var result = await runner.RunInWsl(context.DistroName,
                                 $"bash \"$(wslpath -a '{wslPath}' 2>/dev/null || echo '{wslPath}')\"");
                             LogOutput.Text += $"\n{result.Output}";
@@ -187,7 +187,7 @@ public partial class InstallStep : UserControl
                         var setupSystemdScript = System.IO.Path.Combine(scriptsDir, "setup-systemd.sh");
                         if (System.IO.File.Exists(setupSystemdScript))
                         {
-                            var wslPath = setupSystemdScript.Replace('\\', '/');
+                            var wslPath = setupSystemdScript.Replace('\\', '/').Replace("'", "'\\''");
                             var result = await runner.RunInWsl(context.DistroName,
                                 $"bash \"$(wslpath -a '{wslPath}' 2>/dev/null || echo '{wslPath}')\"");
                             LogOutput.Text += $"\n{result.Output}";

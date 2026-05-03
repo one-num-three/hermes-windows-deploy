@@ -136,12 +136,14 @@ router.post('/chat', requireAuth, async (req, res) => {
                     chatId,
                 })}\n\n`);
             }
+            clearInterval(heartbeat);
             res.end();
         });
 
         proc.on('error', (err) => {
             if (responseEnded) return;
             responseEnded = true;
+            clearInterval(heartbeat);
             res.write(`event: error\ndata: ${JSON.stringify({
                 type: 'error',
                 message: err.message,
@@ -152,8 +154,16 @@ router.post('/chat', requireAuth, async (req, res) => {
 
         // 客户端断开时终止进程
         req.on('close', () => {
+            clearInterval(heartbeat);
             proc.kill('SIGTERM');
         });
+
+        // SSE 心跳：防止代理/负载均衡器因空闲超时断开连接
+        const heartbeat = setInterval(() => {
+            if (!responseEnded) {
+                res.write(':keepalive\n\n');
+            }
+        }, 15000);
 
     } catch (err) {
         res.write(`event: error\ndata: ${JSON.stringify({

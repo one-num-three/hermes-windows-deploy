@@ -6,6 +6,7 @@
 param(
     [switch]$RemoveWsl,     # 同时移除 WSL Ubuntu 发行版
     [switch]$Force,        # 跳过确认提示
+    [ValidatePattern('^[A-Za-z0-9_.-]+$')]
     [string]$WslDistro = "Ubuntu-24.04"
 )
 

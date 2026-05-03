@@ -132,11 +132,19 @@ async function sendMessage(text) {
     // 认证通过 x-api-key header，由服务端 requireAuth 中间件处理
     // 前端无需额外处理 CSRF（API Key 认证本身不受 CSRF 影响）
     const headers = { 'Content-Type': 'application/json' };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分钟超时（对话可能较长）
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers,
       body: JSON.stringify({ message: msg }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`服务器错误 (${response.status}): ${response.statusText}`);
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

@@ -53,7 +53,16 @@ public class PowerShellRunner
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            return new PowerShellResult { ExitCode = -1, Error = "脚本执行超时（15 分钟）" };
+        }
 
         return new PowerShellResult
         {
@@ -104,7 +113,16 @@ try {{
             {
                 return new PowerShellResult { ExitCode = -1, Error = "无法启动提权进程（用户可能拒绝了 UAC）" };
             }
-            await process.WaitForExitAsync();
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+                await process.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                process.Kill(entireProcessTree: true);
+                return new PowerShellResult { ExitCode = -1, Error = "提权脚本执行超时（15 分钟）" };
+            }
 
             // 从临时文件读取输出
             var output = File.Exists(outputFile) ? await File.ReadAllTextAsync(outputFile) : "";
@@ -211,7 +229,16 @@ try {{
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            return new PowerShellResult { ExitCode = -1, Error = "脚本执行超时（15 分钟）" };
+        }
 
         return new PowerShellResult
         {

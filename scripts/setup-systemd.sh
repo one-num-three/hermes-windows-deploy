@@ -6,6 +6,20 @@
 # =============================================================================
 set -e
 
+# 校验环境变量合法性，防止注入
+if [ -n "$WSL_USER" ] && ! echo "$WSL_USER" | grep -qE '^[a-z_][a-z0-9_-]*$'; then
+    echo "错误: WSL_USER 包含非法字符 ($WSL_USER)" >&2
+    exit 1
+fi
+if [ -n "$WEB_PORT" ] && ! echo "$WEB_PORT" | grep -qE '^[0-9]+$'; then
+    echo "错误: WEB_PORT 必须是数字 ($WEB_PORT)" >&2
+    exit 1
+fi
+if [ -n "$WEB_PORT" ] && { [ "$WEB_PORT" -lt 1 ] || [ "$WEB_PORT" -gt 65535 ]; } 2>/dev/null; then
+    echo "错误: WEB_PORT 超出范围 (1-65535)" >&2
+    exit 1
+fi
+
 USER="${WSL_USER:-hermes}"
 PORT="${WEB_PORT:-8648}"
 HOME_DIR="/home/$USER"
@@ -22,8 +36,8 @@ if [ ! -d /run/systemd/system ]; then
     if ! grep -q "systemd=true" /etc/wsl.conf 2>/dev/null; then
         # 检查 [boot] 节是否已存在，避免重复追加
         if grep -q "^\[boot\]" /etc/wsl.conf 2>/dev/null; then
-            # [boot] 节已存在，在节内追加 systemd=true
-            echo "systemd=true" >> /etc/wsl.conf
+            # [boot] 节已存在，用 sed 在节内插入 systemd=true（而非追加到文件末尾）
+            sed -i '/^\[boot\]/a systemd=true' /etc/wsl.conf
         else
             echo "[boot]" >> /etc/wsl.conf
             echo "systemd=true" >> /etc/wsl.conf
