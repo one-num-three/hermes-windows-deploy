@@ -41,3 +41,5 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+scripts/_cache/
+installer/output/
