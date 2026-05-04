@@ -1,0 +1,18 @@
+﻿{
+    "mode":  "cdn",
+    "cdnBase":  "http://121.40.165.216/hermes-cdn/files",
+    "distro":  "Ubuntu-24.04",
+    "port":  8648,
+    "cache":  {
+                  "hermesArchive":  "",
+                  "webUiArchive":  "",
+                  "wslMsi":  "",
+                  "wslKernelMsi":  "",
+                  "ubuntuImage":  "",
+                  "nodeSetup":  ""
+              },
+    "notes":  [
+                  "CDN release bundle for Windows 10/11 installer distribution.",
+                  "Installer fetches runtime assets from the configured CDN base."
+              ]
+}

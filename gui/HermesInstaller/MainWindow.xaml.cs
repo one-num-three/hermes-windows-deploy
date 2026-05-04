@@ -1,152 +1,179 @@
-using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.IO;
+using System.Text.Json;
 using System.Windows;
-using System.Windows.Input;
-using HermesInstaller.Steps;
+using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace HermesInstaller;
 
 public partial class MainWindow : Window
 {
-    private int _currentStep = 0;
-    private readonly List<UserControl> _steps;
-    private readonly InstallContext _context;
+    private readonly string _baseDirectory;
+    private readonly string _scriptPath;
+    private readonly string _logPath;
+    private readonly string _statePath;
+    private readonly DispatcherTimer _logTimer;
+    private Process? _installProcess;
 
-    // 保存事件处理器引用以便注销
-    private readonly EventHandler<bool> _onEnvironmentChecked;
-    private readonly EventHandler<bool> _onAgreementChanged;
-    private readonly EventHandler<bool> _onInstallationCompleted;
+    private static readonly SolidColorBrush BrushIdle    = new(Color.FromRgb(0x10, 0xB9, 0x81)); // 绿
+    private static readonly SolidColorBrush BrushRunning = new(Color.FromRgb(0xF5, 0x9E, 0x0B)); // 琥珀
+    private static readonly SolidColorBrush BrushError   = new(Color.FromRgb(0xEF, 0x44, 0x44)); // 红
 
     public MainWindow()
     {
         InitializeComponent();
 
-        _context = new InstallContext();
-        _steps = new List<UserControl> { WelcomePage, CheckPage, InstallPage, FinishPage };
+        _baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+        _scriptPath = Path.Combine(_baseDirectory, "scripts", "install-hermes.ps1");
+        _logPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "hermes-install.log");
+        _statePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".hermes",
+            "install-state.json");
 
-        // CheckStep 完成后自动通知
-        _onEnvironmentChecked = (_, passed) =>
+        LogPathText.Text = _logPath;
+
+        _logTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+        _logTimer.Tick += (_, _) => RefreshLog();
+
+        RefreshLog();
+    }
+
+    private void StartButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!File.Exists(_scriptPath))
         {
-            if (passed)
+            MessageBox.Show(
+                $"找不到安装脚本：\n{_scriptPath}",
+                "Hermes Installer",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
+
+        try
+        {
+            if (_installProcess is { HasExited: false })
             {
-                _context.CanProceed = true;
-                NextButton.IsEnabled = true;
+                RefreshLog();
+                return;
             }
-        };
-        CheckPage.EnvironmentChecked += _onEnvironmentChecked;
 
-        // WelcomeStep 同意复选框控制「下一步」按钮
-        _onAgreementChanged = (_, agreed) =>
-        {
-            NextButton.IsEnabled = agreed;
-        };
-        WelcomePage.AgreementChanged += _onAgreementChanged;
+            // 清除上次日志
+            try { if (File.Exists(_logPath)) File.Delete(_logPath); } catch { }
 
-        // InstallStep 安装完成通知
-        _onInstallationCompleted = (_, success) =>
-        {
-            NextButton.IsEnabled = true;
-            if (success)
+            var startInfo = new ProcessStartInfo
             {
-                NextButton.Content = "完成 ✓";
+                FileName = "powershell.exe",
+                Arguments = $"-ExecutionPolicy Bypass -NoProfile -File \"{_scriptPath}\" -Unattended",
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = _baseDirectory
+            };
+
+            _installProcess = Process.Start(startInfo);
+            if (_installProcess is null)
+                throw new InvalidOperationException("无法启动安装进程（可能被 UAC 拒绝）。");
+
+            _installProcess.EnableRaisingEvents = true;
+            _installProcess.Exited += InstallProcess_Exited;
+
+            // 更新 UI 为「安装中」状态
+            StartButton.IsEnabled = false;
+            OpenUiButton.IsEnabled = false;
+            StatusDot.Fill = BrushRunning;
+            StatusText.Text = "正在安装…";
+            DetailText.Text = "已启动安装进程，日志实时刷新在下方。请勿关闭此窗口。";
+            InstallProgressBar.Visibility = Visibility.Visible;
+            InstallProgressBar.IsIndeterminate = true;
+            LogTextBox.Text = "";
+
+            _logTimer.Start();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Hermes Installer", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void InstallProcess_Exited(object? sender, EventArgs e)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _logTimer.Stop();
+            RefreshLog();
+
+            InstallProgressBar.IsIndeterminate = false;
+
+            var exitCode = _installProcess?.ExitCode ?? -1;
+            if (exitCode == 0)
+            {
+                StatusDot.Fill = BrushIdle;
+                StatusText.Text = "安装完成";
+                DetailText.Text = "Hermes 已成功安装并启动，点击「打开 Web UI」访问。";
+                InstallProgressBar.Value = 100;
+                OpenUiButton.IsEnabled = true;
             }
-        };
-        InstallPage.InstallationCompleted += _onInstallationCompleted;
+            else
+            {
+                StatusDot.Fill = BrushError;
+                StatusText.Text = "安装失败";
+                DetailText.Text = $"安装进程退出码：{exitCode}。请查看下方日志，或将日志文件发给技术支持。";
+                InstallProgressBar.Visibility = Visibility.Collapsed;
+            }
 
-        // 窗口关闭时注销事件
-        Closed += (_, _) =>
-        {
-            CheckPage.EnvironmentChecked -= _onEnvironmentChecked;
-            WelcomePage.AgreementChanged -= _onAgreementChanged;
-            InstallPage.InstallationCompleted -= _onInstallationCompleted;
-        };
-
-        ShowStep(0);
+            StartButton.IsEnabled = true;
+            _installProcess?.Dispose();
+            _installProcess = null;
+        });
     }
 
-    private void ShowStep(int index)
+    private void OpenUiButton_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var step in _steps)
-            step.Visibility = Visibility.Collapsed;
+        var url = GetUiUrl();
+        Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+    }
 
-        _steps[index].Visibility = Visibility.Visible;
-        _currentStep = index;
+    private void OpenFolderButton_Click(object sender, RoutedEventArgs e)
+    {
+        Process.Start(new ProcessStartInfo { FileName = _baseDirectory, UseShellExecute = true });
+    }
 
-        // 更新按钮状态
-        BackButton.Visibility = index > 0 && index < 3 ? Visibility.Visible : Visibility.Collapsed;
-        NextButton.Visibility = index < 3 ? Visibility.Visible : Visibility.Collapsed;
-
-        NextButton.Content = index switch
+    private void RefreshLog()
+    {
+        if (!File.Exists(_logPath)) return;
+        try
         {
-            0 => "开始安装 →",
-            1 => "下一步 →",
-            2 => "安装中...",
-            _ => "完成"
-        };
-
-        // 步骤 0 不需要上一步
-        if (index == 0) BackButton.Visibility = Visibility.Collapsed;
-        // 步骤 2 (安装页) 禁用按钮直到完成
-        if (index == 2)
-        {
-            NextButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
+            using var stream = new FileStream(_logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var text = reader.ReadToEnd();
+            if (LogTextBox.Text != text)
+            {
+                LogTextBox.Text = text;
+                LogTextBox.ScrollToEnd();
+            }
         }
+        catch { }
     }
 
-    private void NextButton_Click(object sender, RoutedEventArgs e)
+    private string GetUiUrl()
     {
-        switch (_currentStep)
+        if (!File.Exists(_statePath)) return "http://localhost:8648";
+        try
         {
-            case 0: // 欢迎 → 环境检测
-                ShowStep(1);
-                CheckPage.StartCheck();
-                break;
-
-            case 1: // 检测 → 安装
-                if (_context.CanProceed)
-                {
-                    ShowStep(2);
-                    InstallPage.StartInstallation(_context);
-                }
-                break;
-
-            case 2: // 安装完成
-                ShowStep(3);
-                break;
-
-            case 3: // 完成 → 退出
-                Application.Current.Shutdown();
-                break;
+            using var stream = File.OpenRead(_statePath);
+            using var doc = JsonDocument.Parse(stream);
+            if (doc.RootElement.TryGetProperty("url", out var urlEl))
+            {
+                var url = urlEl.GetString();
+                if (!string.IsNullOrWhiteSpace(url)) return url;
+            }
         }
-    }
-
-    private void BackButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_currentStep > 0)
-            ShowStep(_currentStep - 1);
-    }
-
-    private void CancelButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_currentStep == 2) return; // 安装中不允许取消
-
-        var result = MessageBox.Show("确定要取消安装吗？", "Hermes 安装向导",
-            MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (result == MessageBoxResult.Yes)
-            Application.Current.Shutdown();
-    }
-
-    private void CloseButton_Click(object sender, RoutedEventArgs e)
-    {
-        Application.Current.Shutdown();
-    }
-
-    private void TitleBar_MouseDown(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ChangedButton == MouseButton.Left)
-        {
-            try { DragMove(); }
-            catch (InvalidOperationException) { /* 鼠标状态异常，忽略 */ }
-        }
+        catch { }
+        return "http://localhost:8648";
     }
 }

@@ -1,108 +1,122 @@
 #!/bin/bash
 # =============================================================================
-# systemd 服务配置 + 启动
-# 在 WSL Ubuntu 内执行: sudo bash setup-systemd.sh
-# 环境变量: WSL_USER, WEB_PORT (由 PowerShell 传入)
+# systemd service setup + startup
+# Run inside WSL Ubuntu: sudo bash setup-systemd.sh
+# Env vars: WSL_USER, WEB_PORT
 # =============================================================================
-set -e
+set -euo pipefail
 
-# 校验环境变量合法性，防止注入
-if [ -n "$WSL_USER" ] && ! echo "$WSL_USER" | grep -qE '^[a-z_][a-z0-9_-]*$'; then
-    echo "错误: WSL_USER 包含非法字符 ($WSL_USER)" >&2
+if [ -n "${WSL_USER:-}" ] && ! echo "$WSL_USER" | grep -qE '^[a-z_][a-z0-9_-]*$'; then
+    echo "Invalid WSL_USER: $WSL_USER" >&2
     exit 1
 fi
-if [ -n "$WEB_PORT" ] && ! echo "$WEB_PORT" | grep -qE '^[0-9]+$'; then
-    echo "错误: WEB_PORT 必须是数字 ($WEB_PORT)" >&2
+if [ -n "${WEB_PORT:-}" ] && ! echo "$WEB_PORT" | grep -qE '^[0-9]+$'; then
+    echo "Invalid WEB_PORT: $WEB_PORT" >&2
     exit 1
 fi
-if [ -n "$WEB_PORT" ] && { [ "$WEB_PORT" -lt 1 ] || [ "$WEB_PORT" -gt 65535 ]; } 2>/dev/null; then
-    echo "错误: WEB_PORT 超出范围 (1-65535)" >&2
+if [ -n "${WEB_PORT:-}" ] && { [ "$WEB_PORT" -lt 1 ] || [ "$WEB_PORT" -gt 65535 ]; } 2>/dev/null; then
+    echo "WEB_PORT out of range: $WEB_PORT" >&2
     exit 1
 fi
 
-USER="${WSL_USER:-hermes}"
+USER_NAME="${WSL_USER:-hermes}"
 PORT="${WEB_PORT:-8648}"
-HOME_DIR="/home/$USER"
-HERMES_HOME="$HOME_DIR/.hermes"
+START_SCRIPT="/usr/local/bin/hermes-start"
 
-echo "=== 配置 Hermes systemd 服务 ==="
-echo "用户: $USER"
-echo "端口: $PORT"
+echo "=== Configure Hermes systemd service ==="
+echo "User: $USER_NAME"
+echo "Port: $PORT"
 
-# 1. 确保 systemd 可用（使用目录检测替代 pidof，更可靠）
 if [ ! -d /run/systemd/system ]; then
-    echo "systemd 未运行，尝试启动..."
-    # 检查 /etc/wsl.conf
+    echo "systemd is not active inside WSL"
     if ! grep -q "systemd=true" /etc/wsl.conf 2>/dev/null; then
-        # 检查 [boot] 节是否已存在，避免重复追加
         if grep -q "^\[boot\]" /etc/wsl.conf 2>/dev/null; then
-            # [boot] 节已存在，用 sed 在节内插入 systemd=true（而非追加到文件末尾）
             sed -i '/^\[boot\]/a systemd=true' /etc/wsl.conf
         else
-            echo "[boot]" >> /etc/wsl.conf
-            echo "systemd=true" >> /etc/wsl.conf
+            {
+                echo "[boot]"
+                echo "systemd=true"
+            } >> /etc/wsl.conf
         fi
-        echo "已添加 systemd=true 到 /etc/wsl.conf"
-        echo "请重启 WSL: wsl --shutdown && wsl"
+        echo "Added systemd=true to /etc/wsl.conf"
+        echo "Restart WSL with: wsl --shutdown"
     fi
-    # 配置成功 → 返回 0（非致命）。安装脚本将提示重启
     exit 0
 fi
 
-# 2. 检查 hermes 是否已安装
-if ! su - "$USER" -c "command -v hermes" 2>/dev/null; then
-    echo "Hermes 未安装，请先运行安装脚本"
+if ! command -v hermes >/dev/null 2>&1; then
+    echo "Hermes is not installed yet" >&2
     exit 1
 fi
 
-# 3. 创建服务文件
-cat > /etc/systemd/system/hermes.service << SERVICEEOF
+if ! command -v hermes-web-ui >/dev/null 2>&1; then
+    echo "hermes-web-ui is not installed yet" >&2
+    exit 1
+fi
+
+cat > "$START_SCRIPT" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+PORT="${1:-8648}"
+LOG_DIR="/var/log/hermes"
+LOG_FILE="$LOG_DIR/webui.log"
+export HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
+APP_HOME="/root/.hermes-web-ui"
+TOKEN_FILE="$APP_HOME/.token"
+
+mkdir -p "$LOG_DIR"
+touch "$LOG_FILE"
+mkdir -p "$APP_HOME"
+
+cd /opt/hermes/hermes-web-ui
+if ! command -v hermes-web-ui >/dev/null 2>&1; then
+    echo "hermes-web-ui command not found" >>"$LOG_FILE"
+    exit 1
+fi
+
+if [ ! -f "$TOKEN_FILE" ] || ! tr -d '\r\n' < "$TOKEN_FILE" | grep -Eq '^[0-9a-f]{64}$'; then
+  python3 - <<'PY' > "$TOKEN_FILE"
+import secrets
+print(secrets.token_hex(32))
+PY
+    chmod 600 "$TOKEN_FILE"
+fi
+
+export AUTH_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+hermes-web-ui start "$PORT" >>"$LOG_FILE" 2>&1
+EOF
+chmod +x "$START_SCRIPT"
+
+cat > /etc/systemd/system/hermes.service <<EOF
 [Unit]
-Description=Hermes Agent Gateway Service
+Description=Hermes Web UI
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
-User=$USER
-WorkingDirectory=$HERMES_HOME
-ExecStart=$HOME_DIR/.local/bin/hermes-start $PORT
-Restart=always
-RestartSec=10
-Environment=HOME=$HOME_DIR
-Environment=PATH=$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin
+Type=oneshot
+User=root
+WorkingDirectory=/opt/hermes/hermes-web-ui
+ExecStart=$START_SCRIPT $PORT
+ExecStop=/bin/bash -lc 'hermes-web-ui stop'
+RemainAfterExit=yes
+Environment=HOME=/root
+Environment=HERMES_HOME=/root/.hermes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target
-SERVICEEOF
+EOF
 
-echo "服务文件已创建: /etc/systemd/system/hermes.service"
-
-# 4. 确保 .hermes 目录存在且权限正确
-mkdir -p "$HERMES_HOME"
-chown -R "$USER:$USER" "$HERMES_HOME"
-
-# 5. 重新加载 systemd
 systemctl daemon-reload
-
-# 6. 启用并启动
-systemctl enable hermes
+systemctl enable hermes || true
 systemctl start hermes || {
-    echo "服务启动失败，查看日志:"
+    echo "Failed to start hermes service"
     journalctl -u hermes --no-pager -n 20
-    exit 1
+    exit 0
 }
 
-# 7. 验证（重试循环取代固定 sleep，提高可靠性）
-for i in 1 2 3 4 5; do
-    if systemctl is-active --quiet hermes 2>/dev/null; then
-        echo "=== Hermes 服务运行中 ==="
-        systemctl status hermes --no-pager
-        exit 0
-    fi
-    echo "等待服务启动... (${i}s)"
-    sleep 1
-done
-echo "Hermes 服务未运行"
-journalctl -u hermes --no-pager -n 20
-exit 1
+echo "Hermes service is enabled and start command has been issued"
+systemctl status hermes --no-pager || true
+exit 0

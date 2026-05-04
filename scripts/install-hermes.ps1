@@ -1,1027 +1,869 @@
-# =============================================================================
-# Hermes Agent Windows 一键安装脚本
-# Version: 0.2.0
-# 用法: 右键 → 以管理员身份运行
-# =============================================================================
-
 param(
-    [switch]$Unattended,          # 无人值守模式（跳过所有提示）
-    [switch]$SkipWsl,            # 跳过 WSL 安装（已安装时使用）
-    [switch]$SkipUbuntu,         # 跳过 Ubuntu 安装
-    [ValidatePattern('^[a-z_][a-z0-9_-]*$')]
-    [string]$UbuntuUser = "",    # 手动指定 Ubuntu 用户名（默认自动生成）
-    [ValidatePattern('^\d{1,5}$')]
-    [string]$Port = "8648",      # Web UI 端口
-    [switch]$MirrorGitee,       # 使用 Gitee 镜像（替代 GitHub）
-    [ValidateScript({
-        if ($_ -eq "") { return $true }
-        try {
-            $pathInfo = [System.IO.Path]::GetFullPath($_)
-            return [System.IO.Path]::IsPathRooted($pathInfo) -and -not ($pathInfo.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) -and $pathInfo.Length -le 260
-        } catch { return $false }
-    })]
-    [string]$WslPath = "",      # WSL 安装路径（如 D:\\WSL），留空则默认 C 盘
+    [switch]$Unattended,
+    [switch]$SkipWsl,
+    [string]$ConfigPath,
+    [ValidatePattern("^[a-z_][a-z0-9_-]*$")]
+    [string]$UbuntuUser = "hermes",
+    [ValidatePattern("^\d{1,5}$")]
+    [string]$Port = "8648",
+    [ValidatePattern("^[A-Za-z0-9_.-]+$")]
+    [string]$WslDistro = "Ubuntu-24.04",
     [string]$LogPath = "$([Environment]::GetFolderPath('UserProfile'))\hermes-install.log"
 )
 
-# =============================================================================
-# 配置区
-# =============================================================================
-$Script:WSL_DISTRO = "Ubuntu-24.04"
-$Script:WSL_USER = ""
-$Script:WEB_PORT = $Port
-$Script:STATE_FILE = "$([Environment]::GetFolderPath('UserProfile'))\.hermes\install-state.json"
-$Script:CDN_BASE = "http://121.40.165.216/hermes-cdn/files"
-$Script:LOCAL_CACHE = Join-Path $PSScriptRoot "_cache"  # 本地缓存目录，优先使用
-$Script:GITHUB_PROXY = "https://ghproxy.com/"  # GitHub 加速代理（备用）
-$Script:HERMES_REPO = "https://github.com/NousResearch/hermes-agent.git"
-$Script:HERMES_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+$ErrorActionPreference = "Stop"
 
-# 国内镜像源
-$Script:MIRRORS = @{
-    apt     = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
-    pip     = "https://pypi.tuna.tsinghua.edu.cn/simple"
-    npm     = "https://registry.npmmirror.com"
-}
+# 尽早开始记录，确保任何崩溃都有日志
+$_earlyLog = if ($LogPath) { $LogPath } else { "$env:USERPROFILE\hermes-install.log" }
+try { Start-Transcript -Path $_earlyLog -Append -Force | Out-Null } catch {}
 
-# =============================================================================
-# 工具函数
-# =============================================================================
 
-function Write-Step {
-    param([string]$Message, [string]$Status = "")
-    $timestamp = Get-Date -Format "HH:mm:ss"
-    $icon = switch ($Status) {
-        "start"   { "[...]" }
-        "ok"      { "[ ✓ ]" }
-        "error"   { "[ ✗ ]" }
-        "warn"    { "[ ! ]" }
-        "skip"    { "[ → ]" }
-        default   { "[   ]" }
-    }
-    $line = "$timestamp $icon $Message"
-    Write-Host $line -ForegroundColor $(
-        switch ($Status) {
-            "ok"    { "Green" }
-            "error" { "Red" }
-            "warn"  { "Yellow" }
-            "skip"  { "DarkGray" }
-            default { "White" }
-        }
+function Resolve-WslExePath {
+    $candidates = @(
+        "C:\Program Files\WSL\wsl.exe",
+        "$env:WINDIR\System32\wsl.exe",
+        "$env:WINDIR\Sysnative\wsl.exe"
     )
-    Add-Content -Path $LogPath -Value $line
-}
 
-function Write-Error-And-Log {
-    param([string]$Message)
-    Write-Step $Message "error"
-    Add-Content -Path $LogPath -Value "  ERROR DETAIL: $Message"
-}
-
-function Test-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
-    if (-not $isAdmin) {
-        Write-Host "此脚本需要管理员权限。" -ForegroundColor Red
-        Write-Host "请右键此脚本 → '以管理员身份运行'" -ForegroundColor Yellow
-        pause
-        exit 1
-    }
-}
-
-function Test-WindowsVersion {
-    $ver = [Environment]::OSVersion.Version
-    if ($ver.Major -lt 10 -or ($ver.Major -eq 10 -and $ver.Build -lt 19041)) {
-        Write-Error-And-Log "Windows 版本过旧: $($ver.ToString())，需要 Windows 10 2004 (Build 19041) 或更高版本"
-        return $false
-    }
-    return $true
-}
-
-function Test-Virtualization {
-    $cpuInfo = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cpuInfo) {
-        Write-Step "Failed to get CPU info, skip virt check" "warn"
-        return $true
-    }
-    $vmSupport = $cpuInfo.VirtualizationFirmwareEnabled
-    if (-not $vmSupport) {
-        Write-Step "BIOS 虚拟化未开启，WSL2 无法运行" "warn"
-        Write-Host ""
-        Write-Host "  请在 BIOS 中启用 Intel VT-x 或 AMD-V：" -ForegroundColor Yellow
-        Write-Host "  1. 重启电脑，按 F2/Del/Esc 进入 BIOS" -ForegroundColor Gray
-        Write-Host "  2. 找到 'Virtualization Technology' 或 'SVM Mode'" -ForegroundColor Gray
-        Write-Host "  3. 设置为 'Enable'" -ForegroundColor Gray
-        Write-Host "  4. 保存退出，重新运行本脚本" -ForegroundColor Gray
-        Write-Host ""
-        if (-not $Unattended) {
-            $continue = Read-Host "仍要继续安装？可能失败 (y/n)"
-            if ($continue -ne "y") { exit 1 }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
         }
-        return $false
     }
-    return $true
+
+    $command = Get-Command "wsl.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    return $null
 }
 
-function Test-DiskSpace {
-    # 固定检测系统盘 C:（WSL 默认安装在系统盘）
-    $drive = Get-PSDrive -Name C
-    $freeGB = [math]::Round($drive.Free / 1GB, 1)
-    if ($freeGB -lt 5) {
-        Write-Error-And-Log "磁盘空间不足: ${freeGB}GB，需要至少 5GB（实际安装约 3-4GB）"
-        return $false
+$Script:ProjectRoot = $PSScriptRoot
+$Script:RepoRoot = Split-Path $PSScriptRoot -Parent
+$Script:ConfigPath = if ($ConfigPath) { $ConfigPath } else { Join-Path $Script:RepoRoot "config\release.json" }
+$Script:Port = [int]$Port
+$Script:WslDistro = $WslDistro
+$Script:UbuntuUser = $UbuntuUser
+$Script:CdnBase = "http://121.40.165.216/hermes-cdn/files"
+$Script:HermesArchiveUrl = "$Script:CdnBase/hermes-agent.tar.gz"
+$Script:HermesArchiveFallbackUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/main.tar.gz"
+$Script:WebUiArchiveUrl = "$Script:CdnBase/hermes-web-ui.tgz"
+$Script:WebUiArchiveFallbackUrl = "https://github.com/EKKOLearnAI/hermes-web-ui/archive/refs/heads/main.tar.gz"
+$Script:WslMsiUrl = "$Script:CdnBase/wsl.2.6.3.0.x64.msi"
+$Script:WslKernelMsiUrl = "$Script:CdnBase/wsl_update_x64.msi"
+$Script:UbuntuImageUrl = "$Script:CdnBase/ubuntu-noble-wsl-amd64.wsl"
+$Script:StateDir = "$env:USERPROFILE\.hermes"
+$Script:StateFile = Join-Path $Script:StateDir "install-state.json"
+$Script:WslExe = Resolve-WslExePath
+$Script:CacheDir = Join-Path $Script:ProjectRoot "_cache"
+$Script:NodeSetupUrl = "https://deb.nodesource.com/setup_23.x"
+$Script:WslMsiPath = $null
+$Script:WslKernelMsiPath = $null
+$Script:UbuntuImagePath = $null
+$Script:NodeSetupPath = $null
+$Script:PortWasExplicit = $PSBoundParameters.ContainsKey("Port")
+$Script:DistroWasExplicit = $PSBoundParameters.ContainsKey("WslDistro")
+
+function Append-LogLine {
+    param([string]$Text)
+
+    $logDir = Split-Path $LogPath -Parent
+    if ($logDir -and -not (Test-Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
-    Write-Step "磁盘空间: ${freeGB}GB 可用" "ok"
-    return $true
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::AppendAllText($LogPath, $Text + [Environment]::NewLine, $utf8NoBom)
 }
 
-function Test-Memory {
-    $totalGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
-    if ($totalGB -lt 1) {
-        Write-Error-And-Log "内存严重不足: ${totalGB}GB，需要至少 1GB"
-        return $false
-    }
-    if ($totalGB -lt 8) {
-        Write-Step "内存偏低: ${totalGB}GB（建议 8GB），WSL 可能较慢" "warn"
-    }
-    # 配置 WSL 内存限制为总内存的一半，最少 512MB
-    $Script:WSL_MEMORY_LIMIT = [math]::Max(0.5, [math]::Floor($totalGB / 2))
-    Write-Step "内存: ${totalGB}GB（WSL 限制: ${Script:WSL_MEMORY_LIMIT}GB）" "ok"
-    return $true
-}
-
-function Invoke-Download {
+function Invoke-DownloadWithProgress {
     param(
-        [string]$Url,
-        [string]$OutFile,
-        [string]$Description = "文件",
-        [int]$TimeoutSec = 600,
-        [long]$ExpectedSize = 0
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
     )
-    
-    # 1. 本地缓存优先
-    $cacheName = Split-Path $OutFile -Leaf
-    $cachePath = Join-Path $Script:LOCAL_CACHE $cacheName
-    if (Test-Path $cachePath) {
-        $cacheSizeMB = [math]::Round((Get-Item $cachePath).Length / 1MB, 1)
-        Write-Step "使用本地缓存: $cachePath (${cacheSizeMB}MB)" "skip"
-        Copy-Item $cachePath $OutFile -Force
-        return $true
-    }
-    
-    # 2. 文件已存在且完整则跳过下载
-    if (Test-Path $OutFile) {
-        $existingSize = (Get-Item $OutFile).Length
-        if ($ExpectedSize -gt 0 -and $existingSize -lt $ExpectedSize) {
-            Write-Step "$Description 文件不完整 (${existingSize}B / ${ExpectedSize}B)，重新下载..." "warn"
-            Remove-Item $OutFile -Force
-        } elseif ($existingSize -gt 1048576) {
-            $sizeMB = [math]::Round($existingSize / 1MB, 1)
-            Write-Step "$Description 已存在 (${sizeMB}MB)，跳过下载" "skip"
-            return $true
-        }
-    }
-    
-    Write-Step "下载 $Description..." "dl"
-    Write-Step "来源: $Url" "info"
 
-    # 优先用 curl.exe（Win10 1803+ 自带，显示进度条+网速）
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($curl) {
-        $proc = Start-Process -FilePath "curl.exe" -ArgumentList "-L", "-o", "`"$OutFile`"", "--progress-bar", "--connect-timeout", "15", "--max-time", "$TimeoutSec", "`"$Url`"" -Wait -PassThru -NoNewWindow
-        if ($proc.ExitCode -eq 0 -and (Test-Path $OutFile)) {
-            $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
-            Write-Step "$Description 下载完成 (${sizeMB}MB)" "ok"
-            return $true
-        }
-        Write-Step "curl 下载失败 (exit=$($proc.ExitCode))，回退 PowerShell..." "warn"
+    $parent = Split-Path $Destination -Parent
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    # 回退: Invoke-WebRequest（静默）
+    $tempPath = "$Destination.download"
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromMinutes(30)
+
+    $response = $null
+    $responseStream = $null
+    $fileStream = $null
+
     try {
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec
-        $sizeMB = [math]::Round((Get-Item $OutFile).Length / 1MB, 1)
-        Write-Step "$Description 下载完成 (${sizeMB}MB)" "ok"
-        return $true
-    } catch {
-        Write-Step "$Description 下载失败: $_" "error"
-        return $false
-    }
-}
-
-function Invoke-WithRetry {
-    param(
-        [ScriptBlock]$Command,
-        [int]$MaxRetries = 3,
-        [string]$ErrorPrefix = "命令执行失败"
-    )
-    $attempt = 0
-    while ($attempt -lt $MaxRetries) {
-        try {
-            $attempt++
-            & $Command
-            return $true
-        } catch {
-            if ($attempt -ge $MaxRetries) {
-                Write-Step "$ErrorPrefix (已重试 $MaxRetries 次)" "error"
-                return $false
-            }
-            Write-Step "重试 $attempt/$MaxRetries ..." "warn"
-            Start-Sleep -Seconds (5 * $attempt)
-        }
-    }
-}
-
-# =============================================================================
-# 状态管理（断点续装）
-# =============================================================================
-
-function Get-InstallState {
-    if (Test-Path $Script:STATE_FILE) {
-        try {
-            $loaded = Get-Content $Script:STATE_FILE -Raw | ConvertFrom-Json
-            # 确保返回 PSCustomObject（兼容空文件）
-            if ($null -eq $loaded) { return [PSCustomObject]@{} }
-            return $loaded
-        } catch {
-            return [PSCustomObject]@{}
-        }
-    }
-    return [PSCustomObject]@{}
-}
-
-function Set-InstallState {
-    param([string]$Step, [string]$Status)
-    $state = Get-InstallState
-    $state | Add-Member -MemberType NoteProperty -Name $Step -Value @{
-        status = $Status
-        time   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    } -Force
-    $dir = Split-Path $Script:STATE_FILE -Parent
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $state | ConvertTo-Json | Set-Content $Script:STATE_FILE
-}
-
-function Test-StepDone {
-    param([string]$Step)
-    $state = Get-InstallState
-    return ($state.$Step.status -eq "done")
-}
-
-# =============================================================================
-# 安装步骤
-# =============================================================================
-
-# ---- Step 0: 环境检测 ----
-
-function Step-Environment {
-    Write-Step "=== Step 0: 环境检测 ===" "start"
-
-    if (Test-StepDone "environment") {
-        Write-Step "环境检测已通过，跳过" "skip"
-        return $true
-    }
-
-    if (-not (Test-WindowsVersion)) { return $false }
-    if (-not (Test-DiskSpace)) { return $false }
-    if (-not (Test-Memory)) { return $false }
-
-    Test-Virtualization | Out-Null  # 仅警告，不阻断
-
-    Set-InstallState "environment" "done"
-    Write-Step "环境检测通过" "ok"
-    return $true
-}
-
-# ---- Step 1: 安装 WSL2 ----
-
-function Step-InstallWsl {
-    Write-Step "=== Step 1: 安装 WSL2 ===" "start"
-
-    if (Test-StepDone "wsl") {
-        Write-Step "WSL2 已安装，跳过" "skip"
-        return $true
-    }
-
-    $wslCmd = Get-Command wsl.exe -ErrorAction SilentlyContinue
-    if (-not $wslCmd) {
-        Write-Step "WSL 未安装，正在启用 WSL 功能（约 1-3 分钟）..." "start"
-        try {
-            Write-Step "执行: wsl --install --no-distribution" "info"
-            $wslOutput = wsl --install --no-distribution 2>&1
-            $wslOutput | Out-File $LogPath -Append
-            Write-Step "WSL 安装完成，请重启电脑后重新运行本脚本" "warn"
-            Set-InstallState "wsl" "need_reboot"
-
-            # 注册 RunOnce 自动继续
-            $scriptPath = $MyInvocation.MyCommand.Path
-            $runOnceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-            Set-ItemProperty -Path $runOnceKey -Name "HermesContinue" -Value "powershell.exe -File `"$scriptPath`" -SkipWsl" -Force
-            Write-Step "已设置重启后自动继续安装" "ok"
-
-            shutdown /r /t 30 /c "Hermes 安装需要重启以启用 WSL2，30 秒后重启..."
-            exit 0
-        } catch {
-            Write-Error-And-Log "WSL 安装失败: $_"
-            return $false
-        }
-    }
-
-    # 检测 WSL 版本（通过 Get-Command 在 PATH 中查找，而非相对路径）
-    $wslExe = "wsl.exe"
-    if (Test-Path "C:\Program Files\WSL\wsl.exe") {
-        $wslExe = "C:\Program Files\WSL\wsl.exe"
-        $env:PATH = "C:\Program Files\WSL;$env:PATH"
-    }
-    $wslCmd = Get-Command $wslExe -ErrorAction SilentlyContinue
-    if ($wslCmd) {
-        Write-Step "检测到 WSL: $($wslCmd.Source)" "info"
-        $wslVerRaw = (Get-Item $wslCmd.Source).VersionInfo.FileVersion
-        $wslVer = ($wslVerRaw -split ' ')[0]
-        $wslSupportsImport = [Version]$wslVer -ge [Version]"2.0"
-        Write-Step "WSL 版本: $wslVer (支持 --import: $wslSupportsImport)" "info"
-    } else {
-        Write-Step "未找到 wsl.exe" "warn"
-        $wslSupportsImport = $false
-    }
-    if (-not $wslSupportsImport) {
-        Write-Step "WSL 版本过旧，不支持 --import，正在从 CDN 下载更新..." "warn"
-        $wslMsiUrl = "$($Script:CDN_BASE)/wsl.2.6.3.0.x64.msi"
-        $wslMsiPath = "$env:TEMP\\wsl_update.msi"
-        try {
-            Write-Step "从 CDN 下载 WSL MSI (236MB): $wslMsiUrl" "info"
-            Invoke-Download -Url $wslMsiUrl -OutFile $wslMsiPath -Description "WSL MSI" -TimeoutSec 900
-            $msiSizeMB = [math]::Round((Get-Item $wslMsiPath).Length / 1MB, 1)
-            Write-Step "WSL MSI 下载完成 (${msiSizeMB}MB)，正在安装..." "start"
-            Start-Process msiexec.exe -ArgumentList "/i `\"$wslMsiPath`\" /quiet /norestart" -Wait
-            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
-            Write-Step "WSL 已更新，需要重启后生效" "warn"
-            Set-InstallState "wsl" "need_reboot"
-            # 注册 RunOnce 自动继续
-            $scriptPath = $MyInvocation.MyCommand.Path
-            $runOnceKey = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
-            Set-ItemProperty -Path $runOnceKey -Name "HermesContinue" -Value "powershell.exe -File `\"$scriptPath`\"" -Force
-            Write-Step "已设置重启后自动继续" "ok"
-            shutdown /r /t 30 /c "WSL 更新需要重启，30 秒后自动重启..."
-            exit 0
-        } catch {
-            Write-Error-And-Log "WSL MSI 下载/安装失败: $_"
-            Remove-Item $wslMsiPath -Force -ErrorAction SilentlyContinue
-            Write-Step "将继续尝试安装，但 WSL 功能可能受限" "warn"
-        }
-    }
-
-    # 设置 WSL 默认版本为 2
-    $exitCode = 0
-    $wslOutput = wsl --set-default-version 2 2>&1
-    $exitCode = $LASTEXITCODE
-    $wslOutput | Out-File $LogPath -Append
-    if ($exitCode -ne 0) {
-        # WSL2 内核可能未安装，尝试安装
-        Write-Step "WSL2 内核未安装，正在下载..." "warn"
-        $kernelUrl = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
-        $kernelPath = "$env:TEMP\\wsl_update_x64.msi"
-        try {
-            Write-Step "下载 WSL 内核更新..." "info"
-            Invoke-Download -Url $kernelUrl -OutFile $kernelPath -Description "WSL 内核" -TimeoutSec 300
-            Write-Step "安装 WSL 内核..." "start"
-            Start-Process msiexec.exe -ArgumentList "/i `\"$kernelPath`\" /quiet /norestart" -Wait
-            wsl --set-default-version 2
-            # 清理临时文件
-            Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
-            Write-Step "WSL2 内核安装完成" "ok"
-        } catch {
-            Write-Step "WSL2 内核安装失败（非致命），继续..." "warn"
-            Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    # 配置 .wslconfig（始终覆盖，避免旧版损坏文件导致 WSL 无法启动）
-    $wslMemMB = [math]::Max(512, [math]::Floor($Script:WSL_MEMORY_LIMIT * 1024))
-    $wslConfig = @"
-[wsl2]
-memory=${wslMemMB}MB
-processors=2
-networkingMode=mirrored
-"@
-    $wslConfigPath = "$env:USERPROFILE\.wslconfig"
-    Set-Content -Path $wslConfigPath -Value $wslConfig -Encoding ASCII -Force
-    Write-Step ".wslconfig 已配置（内存 ${wslMemMB}MB，mirrored 网络）" "ok"
-
-    Set-InstallState "wsl" "done"
-    Write-Step "WSL2 就绪 ✓" "ok"
-    return $true
-}
-
-# ---- Step 2: 安装 Ubuntu ----
-
-function Step-InstallUbuntu {
-    Write-Step "=== Step 2: 安装 Ubuntu ===" "start"
-
-    if (Test-StepDone "ubuntu") {
-        Write-Step "Ubuntu 已安装，跳过" "skip"
-        return $true
-    }
-
-    $distros = wsl -l -q 2>$null
-    if ($distros -match $Script:WSL_DISTRO) {
-        Write-Step "Ubuntu 24.04 已存在" "skip"
-        Set-InstallState "ubuntu" "done"
-        Write-Step "Ubuntu 24.04 就绪" "ok"
-        return $true
-    }
-
-    # ---- 自定义路径安装（推荐 D 盘用户） ----
-    if ($WslPath) {
-        Write-Step "自定义 WSL 安装路径: $WslPath" "start"
-
-        $wslDir = $WslPath
-        if (-not (Test-Path $wslDir)) {
-            New-Item -ItemType Directory -Path $wslDir -Force | Out-Null
-        }
-
-        # 检查目标盘剩余空间
-        $targetDrive = (Get-Item $wslDir).PSDrive
-        $targetFreeGB = [math]::Round($targetDrive.Free / 1GB, 1)
-        if ($targetFreeGB -lt 5) {
-            Write-Error-And-Log "目标磁盘空间不足: ${targetFreeGB}GB，需要至少 5GB"
-            return $false
-        }
-        Write-Step "目标磁盘可用空间: ${targetFreeGB}GB" "ok"
-
-        # 先检查是否已安装 Ubuntu（直接尝试运行，不依赖 wsl -l -q 的编码输出）
-        $testUbuntu = wsl -d $Script:WSL_DISTRO -- echo "ok" 2>&1
-        if ($LASTEXITCODE -eq 0 -and $testUbuntu -match "ok") {
-            Write-Step "Ubuntu 24.04 已安装，跳过" "skip"
-            Set-InstallState "ubuntu" "done"
-            Write-Step "Ubuntu 24.04 就绪" "ok"
-            return $true
-        }
-
-        # 下载 Ubuntu rootfs (WSL image) — 优先走自建 CDN
-        $rootfsCdnUrl = "$($Script:CDN_BASE)/ubuntu-noble-wsl-amd64.wsl"
-        $rootfsDirectUrl = "https://cdimages.ubuntu.com/ubuntu-wsl/noble/daily-live/current/noble-wsl-amd64.wsl"
-        $rootfsFile = "$env:TEMP\\ubuntu-noble-wsl-amd64.wsl"
-        $distroPath = Join-Path $wslDir $Script:WSL_DISTRO
-
-        Write-Step "下载 Ubuntu 24.04 WSL 镜像（约 376MB，优先 CDN）..." "start"
-        if (Invoke-Download -Url $rootfsCdnUrl -OutFile $rootfsFile -Description "Ubuntu WSL (CDN)" -TimeoutSec 180 -ExpectedSize 380000000) {
-            # CDN 成功
-        } else {
-            Write-Step "CDN 下载失败，回退到官方源..." "warn"
-            if (-not (Invoke-Download -Url $rootfsDirectUrl -OutFile $rootfsFile -Description "Ubuntu WSL (官方)" -TimeoutSec 900 -ExpectedSize 380000000)) {
-                Write-Error-And-Log "rootfs 下载失败"
-                return $false
-            }
-        }
-
-        # 导入到自定义路径
-        Write-Step "导入 Ubuntu 到 $distroPath..." "start"
-        try {
-            $importOutput = wsl --import $Script:WSL_DISTRO $distroPath $rootfsFile --version 2 2>&1
-            $importExit = $LASTEXITCODE
-            if ($importExit -ne 0) {
-                Write-Error-And-Log "WSL 导入失败 (退出码: $importExit)"
-                if ($importOutput) { Write-Step "输出: $importOutput" "error" }
-                Remove-Item $rootfsFile -Force -ErrorAction SilentlyContinue
-                return $false
-            }
-            Remove-Item $rootfsFile -Force -ErrorAction SilentlyContinue
-            Write-Step "Ubuntu 已安装到 $wslDir" "ok"
-        } catch {
-            Write-Error-And-Log "WSL 导入失败: $_"
-            return $false
-        }
-    }
-    # ---- 默认路径安装（C 盘） ----
-    else {
-        Write-Step "正在安装 Ubuntu 24.04 LTS 到默认位置（系统盘）..." "start"
-        Write-Step "提示: 使用 -WslPath 'D:\\WSL' 可安装到其他盘" "warn"
-        try {
-            $ubuntuOutput = wsl --install -d $Script:WSL_DISTRO 2>&1
-            $exitCode = $LASTEXITCODE
-            $ubuntuOutput | Out-File $LogPath -Append
-            if ($exitCode -ne 0) {
-                Write-Error-And-Log "WSL Ubuntu 安装失败，请手动安装: wsl --install -d Ubuntu-24.04"
-                return $false
-            }
-        } catch {
-            Write-Error-And-Log "Ubuntu 安装失败: $_"
-            return $false
-        }
-    }
-
-    Set-InstallState "ubuntu" "done"
-    Write-Step "Ubuntu 24.04 就绪" "ok"
-    return $true
-}
-
-# ---- Step 3: 引导 WSL 环境 ----
-
-function Step-BootstrapWsl {
-    Write-Step "=== Step 3: 引导 WSL 环境 ===" "start"
-
-    if (Test-StepDone "bootstrap") {
-        Write-Step "WSL 环境已初始化，跳过" "skip"
-        return $true
-    }
-
-    # 在 WSL 中创建用户（如果需要）
-    $existingUser = wsl -d $Script:WSL_DISTRO -- bash -c "whoami" 2>$null
-    if ($existingUser -eq "root") {
-        # 需要创建非 root 用户
-        if ([string]::IsNullOrEmpty($UbuntuUser)) {
-            $Script:WSL_USER = [System.Environment]::UserName.ToLower()
-        } else {
-            $Script:WSL_USER = $UbuntuUser
-        }
-
-        Write-Step "创建 Ubuntu 用户: $Script:WSL_USER" "start"
-
-        # 生成随机密码（12 位，含大小写和数字）
-        $chars = "abcdefghkmnpqrstuvwxyzABCDEFGHKMNPQRSTUVWXYZ23456789"
-        $random = -join ((1..12) | ForEach-Object { $chars[(Get-Random -Max $chars.Length)] })
-        $Script:WSL_PASSWORD = $random
-
-        # Base64 编码用户名和密码，防止特殊字符破坏 bash（单引号等）
-        $userB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_USER))
-        $passB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script:WSL_PASSWORD))
-
-        $bashCmd = @'
-USER_B64='__UB64__'; PASS_B64='__PB64__'
-WSL_USER=$(echo "$USER_B64" | base64 -d)
-WSL_PASS=$(echo "$PASS_B64" | base64 -d)
-useradd -m -s /bin/bash "$WSL_USER"
-echo "$WSL_USER:$WSL_PASS" | chpasswd
-echo "$WSL_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$WSL_USER"
-'@
-        $bashCmd = $bashCmd.Replace('__UB64__', $userB64).Replace('__PB64__', $passB64)
-        $createOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c $bashCmd 2>&1
-        $exitCode = $LASTEXITCODE
-        $createOutput | Out-File $LogPath -Append
-
-        Write-Step "用户已创建，密码已自动生成" "ok"
-    } else {
-        $Script:WSL_USER = $existingUser.Trim()
-    }
-
-    # 拷贝 bootstrap 脚本到 WSL
-    $bootstrapScript = Join-Path $PSScriptRoot "wsl-bootstrap.sh"
-    $mirrorScript = Join-Path $PSScriptRoot "setup-mirrors.sh"
-    $systemdScript = Join-Path $PSScriptRoot "setup-systemd.sh"
-
-    if (Test-Path $bootstrapScript) {
-        $wslPath = "\\wsl$\$Script:WSL_DISTRO\tmp\bootstrap.sh"
-        Copy-Item $bootstrapScript -Destination $wslPath -Force
-    }
-    if (Test-Path $mirrorScript) {
-        Copy-Item $mirrorScript -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\setup-mirrors.sh" -Force
-    }
-    if (Test-Path $systemdScript) {
-        Copy-Item $systemdScript -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\setup-systemd.sh" -Force
-    }
-
-    # 运行镜像源配置
-    Write-Step "配置国内镜像源..." "start"
-    if (Test-Path $mirrorScript) {
-        $mirrorOutput = wsl -d $Script:WSL_DISTRO -u root -- bash /tmp/setup-mirrors.sh 2>&1
-        $exitCode = $LASTEXITCODE
-        $mirrorOutput | Out-File $LogPath -Append
-        if ($exitCode -ne 0) {
-            Write-Step "镜像源配置部分失败，继续安装" "warn"
-        }
-    }
-
-    Set-InstallState "bootstrap" "done"
-    Write-Step "WSL 环境初始化完成" "ok"
-    return $true
-}
-
-# ---- Step 4: 安装 Hermes Agent ----
-
-function Step-InstallHermes {
-    Write-Step "=== Step 4: 安装 Hermes Agent ===" "start"
-
-    if (Test-StepDone "hermes") {
-        Write-Step "Hermes 已安装，跳过" "skip"
-        return $true
-    }
-
-    # 检查 Hermes 是否已装（wrapper 文件存在即可）
-    $hermesCheck = wsl -d $Script:WSL_DISTRO -u root -- bash -c "test -f /usr/local/bin/hermes && echo INSTALLED" 2>&1
-    if ($LASTEXITCODE -eq 0 -and $hermesCheck -match 'INSTALLED') {
-        Write-Step "Hermes Agent 已安装" "skip"
-        Set-InstallState "hermes" "done"
-        return $true
-    }
-
-    # 构造 WSL 内安装命令（全部从自建 CDN 下载，零外部依赖）
-    $installScript = @'
-#!/bin/bash
-set -e
-
-echo "[Hermes] ===== Step 1/5: 配置国内镜像源 ====="
-sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
-sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
-pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple 2>/dev/null || true
-git config --global url."https://ghproxy.com/https://github.com/".insteadOf "https://github.com/" 2>/dev/null || true
-
-echo "[Hermes] ===== Step 2/5: 更新 apt 包列表 ====="
-sudo apt-get update
-
-echo "[Hermes] ===== Step 3/5: 安装 Python3 + curl ====="
-sudo apt-get install -y python3 python3-pip python3-venv curl
-
-echo "[Hermes] ===== Step 4/5: 从 CDN 下载安装脚本 ====="
-CDN="__CDN__"
-curl -fSL --progress-bar "$CDN/hermes-install-standalone.sh" -o /tmp/hermes-install.sh
-
-echo "[Hermes] ===== Step 5/5: 安装 Hermes 核心 ====="
-# 如果 Python 文件已存在，跳过下载，直接重建 wrapper
-if [ -f /root/.hermes/hermes-agent/hermes ] && head -1 /root/.hermes/hermes-agent/hermes 2>/dev/null | grep -qi 'python'; then
-    echo "[Hermes] 文件已存在，跳过下载"
-else
-    echo "[Hermes] 下载解压 hermes-agent.tar.gz..."
-    mkdir -p /root/.hermes
-    curl -fSL --retry 3 --retry-delay 5 --progress-bar "$CDN/hermes-agent.tar.gz" -o /tmp/hermes-agent.tar.gz
-    tar xzf /tmp/hermes-agent.tar.gz -C /root/.hermes/
-    rm /tmp/hermes-agent.tar.gz
-    bash /tmp/hermes-install.sh
-fi
-
-echo "[Hermes] ===== 确保 hermes 全局可用 ====="
-rm -f /usr/local/bin/hermes
-cat > /usr/local/bin/hermes << 'EOF'
-#!/bin/bash
-cd /root/.hermes/hermes-agent
-source venv/bin/activate 2>/dev/null
-exec python3 /root/.hermes/hermes-agent/hermes "$@"
-EOF
-chmod +x /usr/local/bin/hermes
-echo "[Hermes] hermes 已安装到 /usr/local/bin/hermes"
-
-echo "[Hermes] ===== 安装完成 ====="
-'@
-    $installScript = $installScript.Replace('__CDN__', $Script:CDN_BASE)
-
-    Write-Step "正在 WSL 内安装 Hermes Agent (apt 更新约 1-3 分钟)..." "start"
-    $wslExe = if (Test-Path "C:\Program Files\WSL\wsl.exe") { "C:\Program Files\WSL\wsl.exe" } else { "wsl.exe" }
-    $hermesLog = "$env:TEMP\hermes-wsl-install.log"
-    # 写入 Windows 临时文件，通过 /mnt/c/ 路径在 WSL 中执行
-    $sh = "$env:TEMP\hermes-install.sh"
-    Set-Content -Path $sh -Value $installScript -Encoding ASCII -Force
-    $wslPath = ($sh -replace '\\','/' -replace 'C:','/mnt/c')
-    $hermesRaw = & $wslExe -d $Script:WSL_DISTRO -u root -- bash $wslPath 2>&1
-    $exitCode = $LASTEXITCODE
-    $hermesRaw | ForEach-Object { Write-Host "  $_"; Add-Content -Path $hermesLog -Value $_ }
-    $hermesOutput = Get-Content $hermesLog -Raw
-    $hermesOutput | Out-File $LogPath -Append
-
-    if ($exitCode -ne 0) {
-        Write-Error-And-Log "Hermes 安装失败 (退出码: $exitCode)"
-        Write-Step "WSL 输出 (最后5行):" "info"
-        ($hermesOutput -split "`n")[-5..-1] | ForEach-Object { Write-Step $_ "" }
-        return $false
-    }
-
-    Set-InstallState "hermes" "done"
-    Write-Step "Hermes Agent 安装完成" "ok"
-    return $true
-}
-
-# ---- Step 5: 安装 hermes-web-ui ----
-
-function Step-InstallWebUi {
-    Write-Step "=== Step 5: 安装 hermes-web-ui ===" "start"
-
-    if (Test-StepDone "webui") {
-        Write-Step "hermes-web-ui 已安装，跳过" "skip"
-        return $true
-    }
-
-    # 检查 WebUI 是否已装
-    $webUiCheck = wsl -d $Script:WSL_DISTRO -u root -- bash -c "npm list -g hermes-web-ui 2>&1" 2>&1
-    if ($LASTEXITCODE -eq 0 -and $webUiCheck -match 'hermes-web-ui') {
-        Write-Step "hermes-web-ui 已安装" "skip"
-        Set-InstallState "webui" "done"
-        return $true
-    }
-
-    $webUiScript = @'
-#!/bin/bash
-set -e
-
-echo "[WebUI] ===== Step 1/3: 安装 Node.js (通过 CDN) ====="
-CDN="__CDN__"
-curl -fSL --progress-bar "$CDN/setup-node22.x" | sudo -E bash -
-sudo apt-get install -y nodejs
-
-echo "[WebUI] ===== Step 2/3: 配置 npm 镜像 ====="
-npm config set registry __MIRROR__
-
-echo "[WebUI] ===== Step 3/3: 安装 hermes-web-ui ====="
-npm install -g hermes-web-ui
-
-echo "[WebUI] ===== Done ====="
-'@
-    $webUiScript = $webUiScript.Replace('__CDN__', $Script:CDN_BASE).Replace('__MIRROR__', $Script:MIRRORS['npm'])
-
-    Write-Step "正在 WSL 内安装 Web UI (约 2-5 分钟)..." "start"
-    $wslExe = if (Test-Path "C:\Program Files\WSL\wsl.exe") { "C:\Program Files\WSL\wsl.exe" } else { "wsl.exe" }
-    $webUiLog = "$env:TEMP\hermes-webui-install.log"
-    $sh = "$env:TEMP\webui-install.sh"
-    Set-Content -Path $sh -Value $webUiScript -Encoding ASCII -Force
-    $wslPath = ($sh -replace '\\','/' -replace 'C:','/mnt/c')
-    $webUiRaw = & $wslExe -d $Script:WSL_DISTRO -u root -- bash $wslPath 2>&1
-    $exitCode = $LASTEXITCODE
-    $webUiRaw | ForEach-Object { Write-Host "  $_"; Add-Content -Path $webUiLog -Value $_ }
-    $webUiOutput = Get-Content $webUiLog -Raw
-    $webUiOutput | Out-File $LogPath -Append
-
-    if ($exitCode -ne 0) {
-        Write-Error-And-Log "hermes-web-ui 安装失败 (退出码: $exitCode)"
-        Write-Step "WSL 输出 (最后5行):" "info"
-        ($webUiOutput -split "`n")[-5..-1] | ForEach-Object { Write-Step $_ "" }
-        return $false
-    }
-
-    Set-InstallState "webui" "done"
-    Write-Step "hermes-web-ui 安装完成" "ok"
-    return $true
-}
-
-# ---- Step 5.5: 集成桌面增强功能 ----
-
-function Step-IntegrateDesktop {
-    Write-Step "=== Step 5.5: 集成桌面增强功能 ===" "start"
-
-    if (Test-StepDone "integrate") {
-        Write-Step "桌面功能已集成，跳过" "skip"
-        return $true
-    }
-
-    # 拷贝 Phase 3 文件到 WSL
-    $desktopDir = Join-Path $PSScriptRoot "..\desktop"
-
-    # Chat API
-    $chatSrc = Join-Path $desktopDir "chat\server\chat-endpoint.js"
-    if (Test-Path $chatSrc) {
-        Copy-Item $chatSrc -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\chat-endpoint.js" -Force
-    }
-
-    # Vue 组件
-    $chatVue = Join-Path $desktopDir "chat\client\ChatPage.vue"
-    $approvalVue = Join-Path $desktopDir "hitl\client\ApprovalPanel.vue"
-    $toolHubVue = Join-Path $desktopDir "mcp\ToolHub.vue"
-
-    if (Test-Path $chatVue) {
-        Copy-Item $chatVue -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\ChatPage.vue" -Force
-    }
-    if (Test-Path $approvalVue) {
-        Copy-Item $approvalVue -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\ApprovalPanel.vue" -Force
-    }
-    if (Test-Path $toolHubVue) {
-        Copy-Item $toolHubVue -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\ToolHub.vue" -Force
-    }
-
-    # Approval WebSocket
-    $approvalSrc = Join-Path $desktopDir "hitl\server\approval-ws.js"
-    if (Test-Path $approvalSrc) {
-        Copy-Item $approvalSrc -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\approval-ws.js" -Force
-    }
-
-    # 拷贝并执行集成脚本
-    $integrateScript = Join-Path $PSScriptRoot "integrate-desktop.sh"
-    if (Test-Path $integrateScript) {
-        Copy-Item $integrateScript -Destination "\\wsl$\$Script:WSL_DISTRO\tmp\integrate-desktop.sh" -Force
-        Write-Step "正在注入桌面增强模块..." "start"
-        $integrateOutput = wsl -d $Script:WSL_DISTRO -u root -- bash /tmp/integrate-desktop.sh $Script:WSL_USER 2>&1
-        $exitCode = $LASTEXITCODE
-        $integrateOutput | Out-File $LogPath -Append
-        if ($exitCode -ne 0) {
-            Write-Step "部分集成失败，基础功能仍可用" "warn"
-        } else {
-            Write-Step "Agent Chat + 审批面板 + Tool Hub 已集成" "ok"
-        }
-    } else {
-        Write-Step "集成脚本未找到，跳过桌面功能" "warn"
-    }
-
-    Set-InstallState "integrate" "done"
-    return $true
-}
-
-# ---- Step 6: 配置开机自启 ----
-
-function Step-SetupAutoStart {
-    Write-Step "=== Step 6: 配置开机自启 ===" "start"
-
-    if (Test-StepDone "autostart") {
-        Write-Step "开机自启已配置，跳过" "skip"
-        return $true
-    }
-
-    # 创建 systemd 服务
-    if (Test-Path (Join-Path $PSScriptRoot "setup-systemd.sh")) {
-        $sysdOutput = wsl -d $Script:WSL_DISTRO -u root -- bash -c "
-            export WSL_USER=$Script:WSL_USER
-            export WEB_PORT=$Script:WEB_PORT
-            bash /tmp/setup-systemd.sh
-        " 2>&1
-        $sysdOutput | Out-File $LogPath -Append
-        if ($LASTEXITCODE -ne 0) {
-            Write-Step "systemd 服务配置失败 (exit=$LASTEXITCODE)，将尝试 systemctl 直接启动" "warn"
-        } else {
-            Write-Step "systemd 服务已创建" "ok"
-        }
-    }
-
-    # 添加 Windows 防火墙规则
-    Write-Step "配置 Windows 防火墙..." "start"
-    try {
-        New-NetFirewallRule -DisplayName "Hermes Web UI" -Direction Inbound -LocalPort $Script:WEB_PORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
-        Write-Step "防火墙规则已添加 (端口 $Script:WEB_PORT)" "ok"
-    } catch {
-        Write-Step "防火墙规则添加失败（可能已存在）" "warn"
-    }
-
-    # Windows Task Scheduler 开机自启
-    $taskName = "HermesAgent-StartWSL"
-    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if (-not $existingTask) {
-        $action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d $Script:WSL_DISTRO -u root -- bash -c 'nohup hermes gateway --port $Script:WEB_PORT > /var/log/hermes.log 2>&1 &'"
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force
-        Write-Step "Task Scheduler 开机任务已注册" "ok"
-    } else {
-        Write-Step "Task Scheduler 任务已存在" "skip"
-    }
-
-    # 启动服务
-    Write-Step "启动 Hermes 服务..." "start"
-    $reloadOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl daemon-reload 2>&1
-    $reloadOutput | Out-File $LogPath -Append
-    if ($LASTEXITCODE -ne 0) {
-        Write-Step "systemctl daemon-reload 失败，继续尝试..." "warn"
-    }
-    $enableOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl enable hermes 2>&1
-    $enableOutput | Out-File $LogPath -Append
-    if ($LASTEXITCODE -ne 0) {
-        Write-Step "systemctl enable hermes 失败，继续..." "warn"
-    }
-    $startOutput = wsl -d $Script:WSL_DISTRO -u root -- systemctl start hermes 2>&1
-    $exitCode = $LASTEXITCODE
-    $startOutput | Out-File $LogPath -Append
-
-    if ($exitCode -ne 0) {
-        Write-Step "systemd 启动失败，改用后台直接启动..." "warn"
-        $fallback = wsl -d $Script:WSL_DISTRO -u root -- bash -c "nohup hermes gateway --port $Script:WEB_PORT > /var/log/hermes.log 2>&1 & echo PID=\$!" 2>&1
-        $fallbackExit = $LASTEXITCODE
-        $fallback | Out-File $LogPath -Append
-        if ($fallbackExit -eq 0 -and $fallback -match 'PID=') {
-            Write-Step "Hermes 已后台启动" "ok"
-        } else {
-            Write-Step "请手动运行: wsl -d $Script:WSL_DISTRO -- hermes gateway --port $Script:WEB_PORT" "warn"
-        }
-    }
-
-    Set-InstallState "autostart" "done"
-    Write-Step "开机自启配置完成" "ok"
-    return $true
-}
-
-# ---- Step 7: 健康检查 ----
-
-function Step-HealthCheck {
-    Write-Step "=== Step 7: 健康检查 ===" "start"
-
-    Write-Step "等待服务启动..." "start"
-    Start-Sleep -Seconds 10
-
-    $maxRetries = 6
-    for ($i = 1; $i -le $maxRetries; $i++) {
-        try {
-            $response = Invoke-WebRequest -Uri "http://localhost:$Script:WEB_PORT" -TimeoutSec 5 -UseBasicParsing
-            if ($response.StatusCode -eq 200) {
-                Write-Step "hermes-web-ui 响应正常 (端口 $Script:WEB_PORT)" "ok"
-                return $true
-            }
-        } catch {
-            Write-Step "等待服务就绪 ($i/$maxRetries)..." "warn"
-            Start-Sleep -Seconds 5
-        }
-    }
-
-    Write-Step "健康检查超时，请检查 WSL 日志" "warn"
-    return $true  # 不阻断，继续
-}
-
-# =============================================================================
-# 主流程
-# =============================================================================
-
-function Main {
-    Clear-Host
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║     Hermes Agent Windows 一键安装程序     ║" -ForegroundColor Cyan
-    Write-Host "║           Version 0.1.0                   ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
-    Write-Host ""
-
-    # 检查管理员权限
-    Test-Admin
-
-    # 初始化日志
-    if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
-    Write-Step "安装日志: $LogPath" ""
-    Write-Step "开始安装 Hermes Agent..." "start"
-    Write-Step "状态文件: $Script:STATE_FILE" ""
-
-    $steps = @(
-        @{Name="environment";   Fn=${function:Step-Environment};   Label="环境检测"},
-        @{Name="wsl";           Fn=${function:Step-InstallWsl};    Label="安装 WSL2"},
-        @{Name="ubuntu";        Fn=${function:Step-InstallUbuntu}; Label="安装 Ubuntu"},
-        @{Name="bootstrap";     Fn=${function:Step-BootstrapWsl};  Label="引导 WSL 环境"},
-        @{Name="hermes";        Fn=${function:Step-InstallHermes}; Label="安装 Hermes Agent"},
-        @{Name="webui";         Fn=${function:Step-InstallWebUi};  Label="安装 Web UI"},
-        @{Name="integrate";     Fn=${function:Step-IntegrateDesktop}; Label="集成桌面增强"},
-        @{Name="autostart";     Fn=${function:Step-SetupAutoStart};Label="配置开机自启"},
-        @{Name="healthcheck";   Fn=${function:Step-HealthCheck};   Label="健康检查"}
-    )
-
-    # 根据参数跳过步骤
-    if ($SkipWsl) {
-        $steps = $steps | Where-Object { $_.Name -notin @("wsl","ubuntu","bootstrap","hermes","webui","integrate","autostart") }
-    }
-
-    $failedSteps = @()
-    $global:InstallAborted = $false
-    foreach ($step in $steps) {
-        if ($global:InstallAborted) { break }
-        $result = & $step.Fn
-        if (-not $result) {
-            $failedSteps += $step.Label
-            if (-not $Unattended) {
-                Write-Host ""
-                $choice = Read-Host "步骤 [$($step.Label)] 失败。选择: (r)重试 (s)跳过 (q)退出"
-                switch ($choice) {
-                    "r" {
-                        Set-InstallState $step.Name "failed"  # 清除状态以便重试
-                        $result = & $step.Fn
-                        if (-not $result) { $failedSteps += "$($step.Label)(重试仍失败)" }
-                    }
-                    "s" {
-                        Write-Step "已跳过: $($step.Label)" "skip"
-                        continue
-                    }
-                    "q" { $global:InstallAborted = $true; break }
+        $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $response.EnsureSuccessStatusCode()
+
+        $totalBytes = $response.Content.Headers.ContentLength
+        $responseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $fileStream = [System.IO.File]::Open($tempPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+
+        $buffer = New-Object byte[] 1048576
+        $downloadedBytes = 0L
+        $lastPercent = -1
+
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $read)
+            $downloadedBytes += $read
+
+            if ($totalBytes -and $totalBytes -gt 0) {
+                $percent = [int][Math]::Floor(($downloadedBytes * 100.0) / $totalBytes)
+                if ($percent -ge ($lastPercent + 5) -or $percent -eq 100) {
+                    Write-Progress -Activity $Label -Status "$percent% ($([math]::Round($downloadedBytes / 1MB, 1)) / $([math]::Round($totalBytes / 1MB, 1)) MB)" -PercentComplete $percent
+                    Append-LogLine -Text ("{0} [   ] {1} {2}% ({3} / {4} MB)" -f (Get-Date -Format "HH:mm:ss"), $Label, $percent, [math]::Round($downloadedBytes / 1MB, 1), [math]::Round($totalBytes / 1MB, 1))
+                    $lastPercent = $percent
                 }
             }
         }
-    }
 
-    # 安装完成
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Green
-    Write-Host "║          安装完成！                       ║" -ForegroundColor Green
-    Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Green
-    Write-Host ""
-
-    if ($failedSteps.Count -gt 0) {
-        Write-Host "部分步骤未能完成:" -ForegroundColor Yellow
-        foreach ($s in $failedSteps) {
-            Write-Host "  ✗ $s" -ForegroundColor Red
-        }
-        Write-Host ""
-    }
-
-    Write-Host "Web UI 地址:  http://localhost:$Script:WEB_PORT" -ForegroundColor Cyan
-    if ($Script:WSL_PASSWORD) {
-        Write-Host ""
-        Write-Host "⚠️  请立即记录以下信息！密码仅在此显示一次，不会写入日志文件" -ForegroundColor Yellow
-        Write-Host "  Ubuntu 用户:  $Script:WSL_USER" -ForegroundColor White
-        Write-Host "  Ubuntu 密码:  $Script:WSL_PASSWORD" -ForegroundColor White
-        Write-Host "  （日常使用不需要密码，仅 sudo/ssh 时需要）" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "  请自行保管好密码，本脚本不会保存密码到任何文件" -ForegroundColor Yellow
-        # 显示后立即清除内存中的密码
-        Remove-Variable -Name WSL_PASSWORD -Scope Script -ErrorAction SilentlyContinue
-    }
-    Write-Host "安装日志:    $LogPath" -ForegroundColor DarkGray
-    Write-Host ""
-
-    # 打开浏览器
-    Write-Step "正在打开浏览器..." "start"
-    Start-Process "http://localhost:$Script:WEB_PORT"
-
-    Write-Host "按任意键退出..." -ForegroundColor DarkGray
-    if (-not $Unattended) {
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        Write-Progress -Activity $Label -Completed
+        Move-Item $tempPath $Destination -Force
+    } finally {
+        if ($fileStream) { $fileStream.Dispose() }
+        if ($responseStream) { $responseStream.Dispose() }
+        if ($response) { $response.Dispose() }
+        if ($client) { $client.Dispose() }
+        Remove-Item $tempPath -Force -ErrorAction SilentlyContinue
     }
 }
 
-Main
+function Resolve-LocalPath {
+    param([string]$RelativeOrAbsolutePath)
+
+    if (-not $RelativeOrAbsolutePath) {
+        return $null
+    }
+
+    if ([System.IO.Path]::IsPathRooted($RelativeOrAbsolutePath)) {
+        return $RelativeOrAbsolutePath
+    }
+
+    return Join-Path $Script:RepoRoot $RelativeOrAbsolutePath
+}
+
+function Resolve-AssetSource {
+    param(
+        [string]$RelativePath,
+        [string]$RemoteUrl
+    )
+
+    $localPath = Resolve-LocalPath $RelativePath
+    if ($localPath -and (Test-Path $localPath)) {
+        return Convert-ToWslPath $localPath
+    }
+
+    return $RemoteUrl
+}
+
+function Ensure-StateDirectory {
+    if (-not (Test-Path $Script:StateDir)) {
+        New-Item -ItemType Directory -Path $Script:StateDir -Force | Out-Null
+    }
+}
+
+function Get-OrDownload-Asset {
+    param(
+        [string]$PreferredPath,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string]$Url
+    )
+
+    if ($PreferredPath -and (Test-Path $PreferredPath)) {
+        return $PreferredPath
+    }
+
+    Ensure-StateDirectory
+    $downloadPath = Join-Path $Script:StateDir $FileName
+    if (Test-Path $downloadPath) {
+        return $downloadPath
+    }
+
+    Write-Step "Downloading $FileName from CDN..." "start"
+    Invoke-DownloadWithProgress -Url $Url -Destination $downloadPath -Label "Downloading $FileName"
+    Write-Step "$FileName downloaded." "ok"
+    return $downloadPath
+}
+
+function Import-ReleaseConfig {
+    if (-not (Test-Path $Script:ConfigPath)) {
+        return
+    }
+
+    $config = Get-Content $Script:ConfigPath -Raw | ConvertFrom-Json
+    if ($config.cdnBase) {
+        $Script:CdnBase = $config.cdnBase
+        $Script:HermesArchiveUrl = "$Script:CdnBase/hermes-agent.tar.gz"
+        $Script:WebUiArchiveUrl = "$Script:CdnBase/hermes-web-ui.tgz"
+        $Script:WslMsiUrl = "$Script:CdnBase/wsl.2.6.3.0.x64.msi"
+        $Script:WslKernelMsiUrl = "$Script:CdnBase/wsl_update_x64.msi"
+        $Script:UbuntuImageUrl = "$Script:CdnBase/ubuntu-noble-wsl-amd64.wsl"
+    }
+    if ($config.port -and -not $Script:PortWasExplicit) {
+        $Script:Port = [int]$config.port
+    }
+    if ($config.distro -and -not $Script:DistroWasExplicit) {
+        $Script:WslDistro = [string]$config.distro
+    }
+    if ($config.cache) {
+        $Script:HermesArchiveUrl = Resolve-AssetSource -RelativePath $config.cache.hermesArchive -RemoteUrl "$Script:CdnBase/hermes-agent.tar.gz"
+        $Script:WebUiArchiveUrl = Resolve-AssetSource -RelativePath $config.cache.webUiArchive -RemoteUrl "$Script:CdnBase/hermes-web-ui.tgz"
+        $Script:WslMsiPath = Resolve-LocalPath $config.cache.wslMsi
+        $Script:WslKernelMsiPath = Resolve-LocalPath $config.cache.wslKernelMsi
+        $Script:UbuntuImagePath = Resolve-LocalPath $config.cache.ubuntuImage
+        $Script:NodeSetupPath = Resolve-LocalPath $config.cache.nodeSetup
+    }
+}
+
+function Write-Step {
+    param(
+        [string]$Message,
+        [ValidateSet("start", "ok", "warn", "error", "info", "skip")]
+        [string]$Status = "info"
+    )
+
+    $timestamp = Get-Date -Format "HH:mm:ss"
+    $prefix = switch ($Status) {
+        "start" { "[...]" }
+        "ok"    { "[OK ]" }
+        "warn"  { "[ ! ]" }
+        "error" { "[ERR]" }
+        "skip"  { "[ ->]" }
+        default { "[   ]" }
+    }
+
+    $line = "$timestamp $prefix $Message"
+    $color = switch ($Status) {
+        "ok"    { "Green" }
+        "warn"  { "Yellow" }
+        "error" { "Red" }
+        "skip"  { "DarkGray" }
+        default { "White" }
+    }
+
+    Write-Host $line -ForegroundColor $color
+    Append-LogLine -Text $line
+}
+
+function Assert-Admin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        throw "Run this script from an elevated PowerShell window."
+    }
+}
+
+function Convert-ToWslPath {
+    param([Parameter(Mandatory = $true)][string]$WindowsPath)
+
+    $full = [System.IO.Path]::GetFullPath($WindowsPath)
+    $drive = $full.Substring(0, 1).ToLowerInvariant()
+    $rest = $full.Substring(3).Replace("\", "/")
+    return "/mnt/$drive/$rest"
+}
+
+function Get-WslDistros {
+    $raw = & $Script:WslExe -l -q 2>$null | Out-String
+    return $raw -split "[`r`n]+" |
+        ForEach-Object { ($_ -replace "`0", "").Trim() } |
+        Where-Object { $_ }
+}
+
+function Invoke-WslCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string]$User = "root",
+        [switch]$IgnoreExitCode
+    )
+
+    $output = & $Script:WslExe -d $Script:WslDistro -u $User -- bash -lc $Command 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($output) {
+        $output | ForEach-Object { Append-LogLine -Text ([string]$_) }
+    }
+    if (-not $IgnoreExitCode -and $exitCode -ne 0) {
+        throw "WSL command failed (exit $exitCode): $Command"
+    }
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Output   = $output
+    }
+}
+
+function Invoke-WslScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$Content,
+        [string]$User = "root",
+        [switch]$IgnoreExitCode
+    )
+
+    $tempFile = Join-Path $env:TEMP ("hermes-" + [guid]::NewGuid().ToString() + ".sh")
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tempFile, $Content, $utf8NoBom)
+    try {
+        $wslPath = Convert-ToWslPath $tempFile
+        $output = & $Script:WslExe -d $Script:WslDistro -u $User -- bash $wslPath 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($output) {
+            $output | ForEach-Object { Append-LogLine -Text ([string]$_) }
+        }
+        if (-not $IgnoreExitCode -and $exitCode -ne 0) {
+            throw "WSL script failed (exit $exitCode): $tempFile"
+        }
+        return [PSCustomObject]@{
+            ExitCode = $exitCode
+            Output   = $output
+        }
+    } finally {
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Wait-HttpReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$Attempts = 12,
+        [int]$DelaySeconds = 5
+    )
+
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+                return $true
+            }
+        } catch {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
+function Get-WebUiLoginUrl {
+    $tokenScript = @'
+mkdir -p /root/.hermes-web-ui
+token_file="/root/.hermes-web-ui/.token"
+running_token=""
+
+if [ -f "$token_file" ]; then
+  file_token=$(tr -d '\r\n' <"$token_file")
+  if printf '%s' "$file_token" | grep -Eq '^[0-9a-f]{64}$'; then
+    printf '%s' "$file_token"
+    exit 0
+  fi
+fi
+
+running_token=$(python3 - <<'PY'
+from pathlib import Path
+
+needle = b"/opt/hermes/hermes-web-ui/dist/server/index.js"
+for cmdline in Path("/proc").glob("*/cmdline"):
+    try:
+        data = cmdline.read_bytes()
+    except OSError:
+        continue
+    if needle not in data:
+        continue
+
+    environ = cmdline.parent / "environ"
+    try:
+        env_data = environ.read_bytes().split(b"\0")
+    except OSError:
+        continue
+
+    for entry in env_data:
+        if entry.startswith(b"AUTH_TOKEN="):
+            token = entry.split(b"=", 1)[1].decode("utf-8", "ignore").strip()
+            print(token)
+            raise SystemExit(0)
+PY
+)
+
+if printf '%s' "$running_token" | grep -Eq '^[0-9a-f]{64}$'; then
+  printf '%s\n' "$running_token" > "$token_file"
+  chmod 600 "$token_file"
+  printf '%s' "$running_token"
+  exit 0
+fi
+
+if [ ! -f "$token_file" ] || ! tr -d '\r\n' <"$token_file" | grep -Eq '^[0-9a-f]{64}$'; then
+  python3 - <<'PY' > /root/.hermes-web-ui/.token
+import secrets
+print(secrets.token_hex(32))
+PY
+  chmod 600 /root/.hermes-web-ui/.token
+fi
+tr -d '\r\n' <"$token_file"
+'@
+
+    $result = Invoke-WslScript -Content $tokenScript -IgnoreExitCode
+    $token = (($result.Output | Out-String).Trim())
+    if ($token) {
+        return "http://localhost:$Script:Port/#/?token=$token"
+    }
+
+    return "http://localhost:$Script:Port"
+}
+
+function Ensure-WslInstalled {
+    Write-Step "Checking WSL..." "start"
+
+    if (-not $Script:WslExe) {
+        if ($SkipWsl) {
+            throw "WSL executable was not found and -SkipWsl was provided."
+        }
+
+        $resolvedWslMsi = Get-OrDownload-Asset -PreferredPath $Script:WslMsiPath -FileName "wsl.2.6.3.0.x64.msi" -Url $Script:WslMsiUrl
+        $resolvedKernelMsi = Get-OrDownload-Asset -PreferredPath $Script:WslKernelMsiPath -FileName "wsl_update_x64.msi" -Url $Script:WslKernelMsiUrl
+
+        Write-Step "Enabling Windows WSL and VirtualMachinePlatform features..." "start"
+        $dismWsl = Start-Process -FilePath "dism.exe" -ArgumentList @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart") -Wait -PassThru
+        Write-Step "DISM WSL feature exit code: $($dismWsl.ExitCode)" "info"
+        $dismVmp = Start-Process -FilePath "dism.exe" -ArgumentList @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart") -Wait -PassThru
+        Write-Step "DISM VMP feature exit code: $($dismVmp.ExitCode)" "info"
+
+        Write-Step "Installing WSL core components from CDN..." "start"
+        $msiLog = Join-Path $env:TEMP "hermes-wsl-install.log"
+        $msiArgs = @("/i", $resolvedWslMsi, "/qb", "/norestart", "/l*v", $msiLog)
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru
+        Write-Step "WSL MSI exit code: $($proc.ExitCode). MSI log: $msiLog" "info"
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            throw "Failed to install WSL MSI from CDN (exit $($proc.ExitCode)). See $msiLog"
+        }
+
+        if ($resolvedKernelMsi -and (Test-Path $resolvedKernelMsi)) {
+            Write-Step "Installing WSL kernel update from CDN..." "start"
+            $kernelLog = Join-Path $env:TEMP "hermes-wsl-kernel.log"
+            $kernelArgs = @("/i", $resolvedKernelMsi, "/qb", "/norestart", "/l*v", $kernelLog)
+            $kernelProc = Start-Process -FilePath "msiexec.exe" -ArgumentList $kernelArgs -Wait -PassThru
+            Write-Step "WSL kernel MSI exit code: $($kernelProc.ExitCode). MSI log: $kernelLog" "info"
+            if ($kernelProc.ExitCode -ne 0 -and $kernelProc.ExitCode -ne 3010) {
+                throw "Failed to install WSL kernel MSI from CDN (exit $($kernelProc.ExitCode)). See $kernelLog"
+            }
+        }
+
+        $Script:WslExe = Resolve-WslExePath
+        if (-not $Script:WslExe) {
+            throw "WSL installation finished but wsl.exe is still unavailable. Reboot Windows, then run this script again."
+        }
+    }
+
+    $wslCommand = Get-Command $Script:WslExe -ErrorAction SilentlyContinue
+    if (-not $wslCommand) {
+        if ($SkipWsl) {
+            throw "WSL is not installed and -SkipWsl was provided."
+        }
+
+        if ($Script:WslMsiPath -and (Test-Path $Script:WslMsiPath)) {
+            Write-Step "Enabling Windows WSL and VirtualMachinePlatform features..." "start"
+            Start-Process -FilePath "dism.exe" -ArgumentList @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart") -Wait | Out-Null
+            Start-Process -FilePath "dism.exe" -ArgumentList @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart") -Wait | Out-Null
+
+            Write-Step "Installing bundled WSL package..." "start"
+            $msiLog = Join-Path $env:TEMP "hermes-wsl-install.log"
+            $msiArgs = @("/i", $Script:WslMsiPath, "/qb", "/norestart", "/l*v", $msiLog)
+            $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru
+            Write-Step "WSL MSI exit code: $($proc.ExitCode). MSI log: $msiLog" "info"
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+                throw "Failed to install bundled WSL MSI (exit $($proc.ExitCode)). See $msiLog"
+            }
+            if ($Script:WslKernelMsiPath -and (Test-Path $Script:WslKernelMsiPath)) {
+                Write-Step "Installing bundled WSL kernel update..." "start"
+                $kernelLog = Join-Path $env:TEMP "hermes-wsl-kernel.log"
+                $kernelArgs = @("/i", $Script:WslKernelMsiPath, "/qb", "/norestart", "/l*v", $kernelLog)
+                $kernelProc = Start-Process -FilePath "msiexec.exe" -ArgumentList $kernelArgs -Wait -PassThru
+                Write-Step "WSL kernel MSI exit code: $($kernelProc.ExitCode). MSI log: $kernelLog" "info"
+                if ($kernelProc.ExitCode -ne 0 -and $kernelProc.ExitCode -ne 3010) {
+                    throw "Failed to install bundled WSL kernel update (exit $($kernelProc.ExitCode)). See $kernelLog"
+                }
+            }
+        } else {
+            Write-Step "Installing WSL core components..." "start"
+            & $Script:WslExe --install --no-distribution 2>&1 | Out-File $LogPath -Append
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to install WSL."
+            }
+        }
+
+        $Script:WslExe = Resolve-WslExePath
+        $wslCommand = Get-Command $Script:WslExe -ErrorAction SilentlyContinue
+        if (-not $wslCommand) {
+            throw "WSL installation finished but wsl.exe is still unavailable. Reboot Windows, then run this script again."
+        }
+    }
+
+    & $Script:WslExe --set-default-version 2 2>&1 | Out-File $LogPath -Append
+    Write-Step "WSL is available." "ok"
+}
+
+function Ensure-UbuntuInstalled {
+    Write-Step "Checking $Script:WslDistro..." "start"
+
+    $distros = Get-WslDistros
+    if ($distros -contains $Script:WslDistro) {
+        Write-Step "$Script:WslDistro is already installed." "skip"
+        return
+    }
+
+    if ($SkipWsl) {
+        throw "$Script:WslDistro is missing and -SkipWsl was provided."
+    }
+
+    $resolvedUbuntuImage = $null
+    if ($Script:UbuntuImagePath -and (Test-Path $Script:UbuntuImagePath)) {
+        $resolvedUbuntuImage = $Script:UbuntuImagePath
+    } elseif (-not $SkipWsl) {
+        $resolvedUbuntuImage = Get-OrDownload-Asset -PreferredPath $null -FileName "ubuntu-noble-wsl-amd64.wsl" -Url $Script:UbuntuImageUrl
+    }
+
+    if ($resolvedUbuntuImage -and (Test-Path $resolvedUbuntuImage)) {
+        $installBase = Join-Path $env:LOCALAPPDATA "HermesWSL\$Script:WslDistro"
+        New-Item -ItemType Directory -Path $installBase -Force | Out-Null
+        Write-Step "Importing bundled Ubuntu image..." "start"
+        & $Script:WslExe --import $Script:WslDistro $installBase $resolvedUbuntuImage --version 2 2>&1 | Out-File $LogPath -Append
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to import bundled Ubuntu image for $Script:WslDistro."
+        }
+    } else {
+        Write-Step "Installing $Script:WslDistro..." "start"
+        & $Script:WslExe --install -d $Script:WslDistro 2>&1 | Out-File $LogPath -Append
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install $Script:WslDistro."
+        }
+
+        throw "$Script:WslDistro was installed. If Windows asks for a restart or first-run setup, finish that first, then rerun this script."
+    }
+
+    Write-Step "$Script:WslDistro was imported." "ok"
+}
+
+function Ensure-WslResponsive {
+    Write-Step "Starting WSL distro..." "start"
+
+    & $Script:WslExe --shutdown 2>&1 | Out-File $LogPath -Append
+
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        $result = Invoke-WslCommand -Command "true" -IgnoreExitCode
+        if ($result.ExitCode -eq 0) {
+            Write-Step "WSL distro is ready." "ok"
+            return
+        }
+
+        $outputText = ($result.Output | Out-String)
+        if ($outputText -match "HCS_E_SERVICE_NOT_AVAILABLE") {
+            Write-Step "WSL backend is not ready yet. Restarting WSL services (attempt $attempt/6)..." "warn"
+            foreach ($serviceName in @("WSLService", "vmcompute")) {
+                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($service) {
+                    try {
+                        if ($service.Status -eq "Running") {
+                            Restart-Service -Name $serviceName -Force -ErrorAction Stop
+                        } else {
+                            Start-Service -Name $serviceName -ErrorAction Stop
+                        }
+                    } catch {
+                        Write-Step "Could not restart service ${serviceName}: $($_.Exception.Message)" "warn"
+                    }
+                }
+            }
+        } else {
+            Write-Step "WSL startup attempt $attempt/6 failed. Retrying..." "warn"
+        }
+
+        Start-Sleep -Seconds ([Math]::Min(3 * $attempt, 15))
+    }
+
+    throw "WSL did not become responsive. If this happened right after a reboot, wait 15-30 seconds and run the installer again."
+}
+
+function Install-HermesStack {
+    Write-Step "Installing Hermes core and hermes-web-ui..." "start"
+
+    $installScript = @'
+#!/bin/bash
+set -euo pipefail
+trap 'echo "FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export DEBIAN_FRONTEND=noninteractive
+
+INSTALL_ROOT="/opt/hermes"
+AGENT_DIR="$INSTALL_ROOT/hermes-agent"
+WEBUI_DIR="$INSTALL_ROOT/hermes-web-ui"
+DATA_DIR="/root/.hermes"
+
+install_from_archive() {
+  local name="$1"
+  local target_dir="$2"
+  shift 2
+  local parent_dir
+  local temp_dir
+  local archive_path
+  local source_dir
+  local archive_url
+  local curl_err
+
+  parent_dir="$(dirname "$target_dir")"
+  temp_dir="$(mktemp -d)"
+  archive_path="$temp_dir/source.tar.gz"
+  curl_err="$temp_dir/curl.err"
+
+  mkdir -p "$parent_dir"
+
+  if [ -d "$target_dir" ]; then
+    mv "$target_dir" "${target_dir}.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+
+  for archive_url in "$@"; do
+    [ -n "$archive_url" ] || continue
+    echo "Downloading $name archive from $archive_url"
+    : > "$curl_err"
+    if curl -fsSL --retry 3 --connect-timeout 20 --max-time 1800 "$archive_url" -o "$archive_path" 2>"$curl_err"; then
+      break
+    else
+      cat "$curl_err" >&2 || true
+    fi
+  done
+  if [ ! -s "$archive_path" ]; then
+    echo "Failed to download archive for $name from all sources." >&2
+    exit 1
+  fi
+
+  tar -xzf "$archive_path" -C "$temp_dir"
+  source_dir="$temp_dir"
+
+  if [ ! -f "$source_dir/pyproject.toml" ] && [ ! -f "$source_dir/setup.py" ] && [ ! -f "$source_dir/package.json" ]; then
+    local child_count
+    child_count="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+    if [ "$child_count" = "1" ]; then
+      local first_dir
+      first_dir="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+      if [ -f "$first_dir/pyproject.toml" ] || [ -f "$first_dir/setup.py" ] || [ -f "$first_dir/package.json" ]; then
+        source_dir="$first_dir"
+      fi
+    fi
+  fi
+
+  if [ ! -f "$source_dir/pyproject.toml" ] && [ ! -f "$source_dir/setup.py" ] && [ ! -f "$source_dir/package.json" ]; then
+    echo "Archive for $name did not unpack to a recognizable project root." >&2
+    find "$temp_dir" -maxdepth 2 -type f | sed -n '1,40p' >&2 || true
+    exit 1
+  fi
+
+  mkdir -p "$target_dir"
+  cp -a "$source_dir"/. "$target_dir"/
+  rm -rf "$temp_dir"
+}
+
+is_hermes_installed() {
+  [ -f "$AGENT_DIR/pyproject.toml" ] &&
+  [ -d "$AGENT_DIR/venv" ] &&
+  [ -x /usr/local/bin/hermes ]
+}
+
+is_webui_installed() {
+  [ -f "$WEBUI_DIR/package.json" ] &&
+  [ -d "$WEBUI_DIR/dist" ] &&
+  command -v hermes-web-ui >/dev/null 2>&1
+}
+
+if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+  sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources || true
+  sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources || true
+fi
+
+apt-get update
+apt-get install -y ca-certificates curl git python3 python3-pip python3-venv build-essential
+
+if ! command -v node >/dev/null 2>&1 || ! node --version 2>/dev/null | grep -Eq '^v2(3|4)\.'; then
+  if [ -f "__NODE_SETUP__" ]; then
+    bash "__NODE_SETUP__"
+  else
+    curl -fsSL "__NODE_SETUP__" | bash -
+  fi
+  apt-get install -y nodejs
+fi
+
+mkdir -p "$INSTALL_ROOT" "$DATA_DIR" /var/log/hermes
+
+if is_hermes_installed; then
+  echo "Hermes core already installed, skipping reinstall."
+else
+  install_from_archive "Hermes core" "$AGENT_DIR" "__HERMES_ARCHIVE__" "__HERMES_ARCHIVE_FALLBACK__"
+
+  cd "$AGENT_DIR"
+
+  if [ ! -d venv ]; then
+    python3 -m venv venv
+  fi
+
+  source venv/bin/activate
+  python -m pip install --upgrade pip setuptools wheel
+  pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple || true
+  npm config set registry https://registry.npmmirror.com || true
+  pip install -e .
+
+  cat > /usr/local/bin/hermes <<'EOF'
+#!/bin/bash
+cd /opt/hermes/hermes-agent
+source venv/bin/activate 2>/dev/null
+export HERMES_HOME=/root/.hermes
+exec python3 /opt/hermes/hermes-agent/hermes "$@"
+EOF
+  chmod +x /usr/local/bin/hermes
+fi
+
+if is_webui_installed; then
+  echo "Hermes Web UI already installed, skipping reinstall."
+else
+  install_from_archive "Hermes Web UI" "$WEBUI_DIR" "__WEBUI_ARCHIVE__" "__WEBUI_ARCHIVE_FALLBACK__"
+
+  if [ -d "$WEBUI_DIR/dist" ] && [ -f "$WEBUI_DIR/package.json" ]; then
+    cd "$WEBUI_DIR"
+    npm install --omit=dev
+    npm install -g "$WEBUI_DIR"
+  else
+    cd "$WEBUI_DIR"
+    npm install
+    npm run build
+    npm install -g "$WEBUI_DIR"
+  fi
+fi
+'@
+    $nodeSetupSource = if ($Script:NodeSetupPath -and (Test-Path $Script:NodeSetupPath)) { Convert-ToWslPath $Script:NodeSetupPath } else { $Script:NodeSetupUrl }
+    $installScript = $installScript.Replace('__HERMES_ARCHIVE__', $Script:HermesArchiveUrl).Replace('__HERMES_ARCHIVE_FALLBACK__', $Script:HermesArchiveFallbackUrl).Replace('__WEBUI_ARCHIVE__', $Script:WebUiArchiveUrl).Replace('__WEBUI_ARCHIVE_FALLBACK__', $Script:WebUiArchiveFallbackUrl).Replace('__NODE_SETUP__', $nodeSetupSource)
+
+    Invoke-WslScript -Content $installScript | Out-Null
+    Write-Step "Hermes core and hermes-web-ui were installed." "ok"
+}
+
+function Install-StartupFiles {
+    Write-Step "Syncing startup helper scripts..." "start"
+
+    $startScriptSource = Join-Path $Script:ProjectRoot "hermes-start.sh"
+    $systemdScriptSource = Join-Path $Script:ProjectRoot "setup-systemd.sh"
+
+    if (-not (Test-Path $startScriptSource)) {
+        throw "Missing helper script: $startScriptSource"
+    }
+    if (-not (Test-Path $systemdScriptSource)) {
+        throw "Missing helper script: $systemdScriptSource"
+    }
+
+    $startScriptWsl = Convert-ToWslPath $startScriptSource
+    $systemdScriptWsl = Convert-ToWslPath $systemdScriptSource
+
+    Invoke-WslCommand -Command "cp '$startScriptWsl' /usr/local/bin/hermes-start && chmod +x /usr/local/bin/hermes-start" | Out-Null
+    Invoke-WslCommand -Command "cp '$systemdScriptWsl' /usr/local/bin/setup-hermes-systemd && chmod +x /usr/local/bin/setup-hermes-systemd" | Out-Null
+
+    $quotedUser = $Script:UbuntuUser
+    $quotedPort = $Script:Port
+    $systemdResult = Invoke-WslCommand -Command "WSL_USER='$quotedUser' WEB_PORT='$quotedPort' /usr/local/bin/setup-hermes-systemd" -IgnoreExitCode
+    if ($systemdResult.ExitCode -ne 0) {
+        Write-Step "systemd setup did not complete. CLI startup will continue without relying on systemd." "warn"
+    }
+
+    Write-Step "Startup helper scripts are in place." "ok"
+}
+
+function Configure-WindowsIntegration {
+    Write-Step "Configuring Windows startup integration..." "start"
+
+    try {
+        New-NetFirewallRule -DisplayName "Hermes Web UI" -Direction Inbound -LocalPort $Script:Port -Protocol TCP -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        Write-Step "Firewall rule could not be updated. Continuing." "warn"
+    }
+
+    $taskName = "HermesAgent-StartWSL"
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if (-not $existingTask) {
+        $action = New-ScheduledTaskAction -Execute $Script:WslExe -Argument "-d $Script:WslDistro -u root -- /usr/local/bin/hermes-start $Script:Port"
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Step "Startup task was registered." "ok"
+    } else {
+        Write-Step "Startup task already exists." "skip"
+    }
+}
+
+function Start-HermesNow {
+    Write-Step "Starting Hermes services..." "start"
+    Invoke-WslCommand -Command "hermes-web-ui stop >/dev/null 2>&1 || true; pkill -f 'hermes-start|hermes-web-ui|hermes dashboard|vite --host --port $Script:Port' || true; fuser -k $Script:Port/tcp >/dev/null 2>&1 || true" -IgnoreExitCode | Out-Null
+    Invoke-WslCommand -Command "nohup /usr/local/bin/hermes-start $Script:Port </dev/null >>/var/log/hermes/webui.log 2>&1 &" | Out-Null
+
+    $ready = Wait-HttpReady -Url "http://localhost:$Script:Port"
+    if (-not $ready) {
+        Invoke-WslCommand -Command "tail -n 50 /var/log/hermes-start.log || true; tail -n 50 /var/log/hermes/webui.log || true; tail -n 50 /root/.hermes-web-ui/server.log || true" -IgnoreExitCode | Out-Null
+        throw "Hermes did not become reachable at http://localhost:$Script:Port"
+    }
+
+    Write-Step "Hermes is reachable at http://localhost:$Script:Port" "ok"
+}
+
+function Save-State {
+    if (-not (Test-Path $Script:StateDir)) {
+        New-Item -ItemType Directory -Path $Script:StateDir -Force | Out-Null
+    }
+
+    $state = [PSCustomObject]@{
+        distro = $Script:WslDistro
+        port   = $Script:Port
+        url    = (Get-WebUiLoginUrl)
+        time   = (Get-Date).ToString("s")
+    }
+    $state | ConvertTo-Json | Set-Content -Path $Script:StateFile -Encoding UTF8
+}
+
+function Main {
+    Write-Step "Log file: $LogPath" "info"
+    Write-Step "Project root: $Script:ProjectRoot" "info"
+
+    Assert-Admin
+    Ensure-WslInstalled
+    Ensure-UbuntuInstalled
+    Ensure-WslResponsive
+    Install-HermesStack
+    Install-StartupFiles
+    Configure-WindowsIntegration
+    Start-HermesNow
+    Save-State
+
+    $loginUrl = Get-WebUiLoginUrl
+    Write-Step "Install completed successfully." "ok"
+    Write-Step "Open URL: $loginUrl" "info"
+    Start-Process $loginUrl
+
+    if (-not $Unattended) {
+        Write-Host ""
+        Write-Host "Open: $loginUrl" -ForegroundColor Cyan
+        Write-Host "Press Enter to exit."
+        [void](Read-Host)
+    }
+}
+
+try {
+    Import-ReleaseConfig
+    Main
+    Stop-Transcript | Out-Null
+} catch {
+    $errMsg = $_.Exception.Message
+    $errStack = $_.ScriptStackTrace
+    Write-Host "$(Get-Date -Format 'HH:mm:ss') [ERR] $errMsg" -ForegroundColor Red
+    Write-Host "$errStack" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Install failed. See log: $LogPath" -ForegroundColor Red
+    try { Stop-Transcript | Out-Null } catch {}
+    if (-not $Unattended) {
+        Read-Host "按 Enter 键退出（日志已保存至 $LogPath）"
+    }
+    exit 1
+}

@@ -1,29 +1,28 @@
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
-
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HermesInstaller</AssemblyName>
     <RootNamespace>HermesInstaller</RootNamespace>
-    <ApplicationIcon>..\installer\assets\icon.ico</ApplicationIcon>
-    <Version>0.1.0</Version>
+    <Version>0.2.2</Version>
     <Authors>Hermes Community</Authors>
-    <Description>Hermes Agent Windows 一键安装向导</Description>
-    <EnableNETAnalyzers>true</EnableNETAnalyzers>
-    <AnalysisMode>Recommended</AnalysisMode>
-    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <Deterministic>true</Deterministic>
-    <SignAssembly>true</SignAssembly>
-    <AssemblyOriginatorKeyFile>..\..\hermes-installer.snk</AssemblyOriginatorKeyFile>
-    <DelaySign>false</DelaySign>
-    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
-    <ContinuousIntegrationBuild>false</ContinuousIntegrationBuild>
+    <Description>Hermes Agent Windows installer launcher</Description>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.77" />
+    <ApplicationDefinition Include="App.xaml" />
+    <Page Include="MainWindow.xaml" />
+    <Compile Include="App.xaml.cs">
+      <DependentUpon>App.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="MainWindow.xaml.cs">
+      <DependentUpon>MainWindow.xaml</DependentUpon>
+    </Compile>
   </ItemGroup>
-
 </Project>

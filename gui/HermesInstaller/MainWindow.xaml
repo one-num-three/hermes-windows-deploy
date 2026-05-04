@@ -1,71 +1,252 @@
 <Window x:Class="HermesInstaller.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:steps="clr-namespace:HermesInstaller.Steps"
-        Title="Hermes Agent 安装向导"
-        Width="620" Height="520"
-        ResizeMode="NoResize"
+        Title="Hermes Installer"
+        Width="860" Height="660"
+        MinWidth="700" MinHeight="520"
         WindowStartupLocation="CenterScreen"
-        WindowStyle="None"
-        AllowsTransparency="True"
-        Background="Transparent">
+        ResizeMode="CanResize"
+        Background="#EEF2FA">
 
-    <Border Background="#FFFFFF" CornerRadius="12" BorderBrush="#E0E0E0" BorderThickness="1">
-        <Grid Margin="0">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+    <Window.Resources>
 
-            <!-- 标题栏 -->
-            <Border Grid.Row="0" Background="#1A1A2E" CornerRadius="12,12,0,0" Height="48"
-                    MouseLeftButtonDown="TitleBar_MouseDown">
-                <Grid Margin="16,0">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="⚡" FontSize="20" Margin="0,0,8,0"/>
-                        <TextBlock Text="Hermes Agent 安装向导" Foreground="White" FontSize="16"
-                                   FontWeight="SemiBold" VerticalAlignment="Center"/>
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#6366F1"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="20,0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#4F46E5"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#4338CA"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#C7D2FE"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="Foreground" Value="#374151"/>
+            <Setter Property="BorderBrush" Value="#D1D5DB"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#F9FAFB"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#9CA3AF"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#F3F4F6"/>
+                                <Setter Property="Foreground" Value="#9CA3AF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ══ 顶栏 ══ -->
+        <Border Grid.Row="0" Background="#111827">
+            <Grid Margin="24,18">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Background="#6366F1" CornerRadius="10"
+                            Width="44" Height="44" Margin="0,0,14,0">
+                        <TextBlock Text="⚡" FontSize="24"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Hermes Installer"
+                                   FontSize="20" FontWeight="Bold" Foreground="White"/>
+                        <TextBlock Text="AI Agent · Windows 一键部署"
+                                   FontSize="12" Foreground="#9CA3AF" Margin="0,3,0,0"/>
                     </StackPanel>
-                    <Button Content="✕" Click="CloseButton_Click"
-                            Style="{StaticResource TitleBarButton}"
-                            HorizontalAlignment="Right" Width="32" Height="32"/>
-                </Grid>
-            </Border>
+                </StackPanel>
 
-            <!-- 内容区 -->
-            <Grid Grid.Row="1" Margin="32,24,32,16">
-                <!-- 欢迎页 -->
-                <steps:WelcomeStep x:Name="WelcomePage" Visibility="Visible"/>
-
-                <!-- 检测页 -->
-                <steps:CheckStep x:Name="CheckPage" Visibility="Collapsed"/>
-
-                <!-- 安装页（进度） -->
-                <steps:InstallStep x:Name="InstallPage" Visibility="Collapsed"/>
-
-                <!-- 完成页 -->
-                <steps:FinishStep x:Name="FinishPage" Visibility="Collapsed"/>
+                <Border Grid.Column="1" Background="#1F2937" CornerRadius="6"
+                        Padding="10,4" VerticalAlignment="Center">
+                    <TextBlock Text="v0.2.2" FontSize="12" Foreground="#6B7280"
+                               FontFamily="Consolas"/>
+                </Border>
             </Grid>
+        </Border>
 
-            <!-- 底部按钮 -->
-            <Border Grid.Row="2" Background="#F5F5F5" CornerRadius="0,0,12,12" Padding="24,16">
-                <Grid>
-                    <Button x:Name="BackButton" Content="← 上一步"
-                            Click="BackButton_Click" Visibility="Collapsed"
-                            Style="{StaticResource SecondaryButton}"
-                            HorizontalAlignment="Left"/>
+        <!-- ══ 状态卡片 ══ -->
+        <Border Grid.Row="1" Margin="16,14,16,0" Background="White"
+                CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1">
+            <Border.Effect>
+                <DropShadowEffect Color="#000000" Opacity="0.06"
+                                  BlurRadius="14" ShadowDepth="2" Direction="270"/>
+            </Border.Effect>
+            <Grid Margin="20,16">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button x:Name="NextButton" Content="下一步 →"
-                                Click="NextButton_Click"
-                                Style="{StaticResource PrimaryButton}"/>
-                        <Button x:Name="CancelButton" Content="取消"
-                                Click="CancelButton_Click" Margin="8,0,0,0"
-                                Style="{StaticResource SecondaryButton}"/>
+                <!-- 状态行 -->
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse x:Name="StatusDot" Width="10" Height="10"
+                                 Fill="#10B981" Margin="0,0,10,0"/>
+                        <TextBlock x:Name="StatusText"
+                                   FontSize="16" FontWeight="SemiBold"
+                                   Foreground="#111827" Text="准备就绪"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="StartButton"
+                                Style="{StaticResource PrimaryButton}"
+                                Content="▶  开始安装"
+                                Width="120" Height="38"
+                                Margin="0,0,8,0"
+                                Click="StartButton_Click"/>
+                        <Button x:Name="OpenUiButton"
+                                Style="{StaticResource SecondaryButton}"
+                                Content="打开 Web UI"
+                                Width="110" Height="38"
+                                Margin="0,0,8,0"
+                                IsEnabled="False"
+                                Click="OpenUiButton_Click"/>
+                        <Button x:Name="OpenFolderButton"
+                                Style="{StaticResource SecondaryButton}"
+                                Content="📂 目录"
+                                Width="80" Height="38"
+                                Click="OpenFolderButton_Click"/>
                     </StackPanel>
                 </Grid>
-            </Border>
+
+                <!-- 说明文字 -->
+                <TextBlock Grid.Row="1" x:Name="DetailText"
+                           Text="点击「开始安装」，程序将自动申请管理员权限并开始部署。"
+                           FontSize="13" Foreground="#6B7280"
+                           Margin="0,10,0,0" TextWrapping="Wrap"/>
+
+                <!-- 进度条（安装中才显示） -->
+                <ProgressBar Grid.Row="2" x:Name="InstallProgressBar"
+                             Height="4" Margin="0,12,0,0"
+                             Visibility="Collapsed"
+                             IsIndeterminate="True"
+                             Foreground="#6366F1" Background="#E0E7FF"/>
+            </Grid>
+        </Border>
+
+        <!-- ══ 日志区域 ══ -->
+        <Border Grid.Row="2" Margin="16,12,16,0"
+                Background="#0D1117" CornerRadius="12"
+                BorderBrush="#30363D" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 日志标题栏（仿终端风格） -->
+                <Border Grid.Row="0" Background="#161B22"
+                        CornerRadius="12,12,0,0"
+                        BorderBrush="#30363D" BorderThickness="0,0,0,1">
+                    <Grid Margin="16,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 红黄绿三个点 -->
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="12" Height="12" Fill="#FF5F57" Margin="0,0,6,0"/>
+                            <Ellipse Width="12" Height="12" Fill="#FEBC2E" Margin="0,0,6,0"/>
+                            <Ellipse Width="12" Height="12" Fill="#28C840" Margin="0,0,14,0"/>
+                            <TextBlock Text="安装日志" FontSize="12" FontWeight="SemiBold"
+                                       Foreground="#8B949E" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- 日志文件路径 -->
+                        <TextBlock Grid.Column="2" x:Name="LogPathText"
+                                   FontSize="11" Foreground="#484F58"
+                                   FontFamily="Consolas"
+                                   VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+
+                <!-- 日志内容 -->
+                <TextBox x:Name="LogTextBox" Grid.Row="1"
+                         Background="Transparent"
+                         Foreground="#C9D1D9"
+                         FontFamily="Consolas, Courier New"
+                         FontSize="12"
+                         BorderThickness="0"
+                         IsReadOnly="True"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled"
+                         Padding="16,12"
+                         CaretBrush="Transparent"
+                         SelectionBrush="#264F78"/>
+            </Grid>
+        </Border>
+
+        <!-- ══ 底栏 ══ -->
+        <Grid Grid.Row="3" Margin="20,10,20,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Foreground="#9CA3AF" FontSize="11" VerticalAlignment="Center"
+                       Text="如安装失败，请将日志文件发送给技术支持"/>
+            <TextBlock Grid.Column="1" Foreground="#6B7280" FontSize="11"
+                       VerticalAlignment="Center" Text="Hermes Community · v0.2.2"/>
         </Grid>
-    </Border>
+
+    </Grid>
 </Window>

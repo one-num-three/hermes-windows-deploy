@@ -1,338 +1,361 @@
-# =============================================================================
-# Hermes Windows 部署工具 — 自举构建脚本（零手动依赖）
-# 自动下载 dotnet SDK + Inno Setup → 编译 → 打包 → 输出 exe
-# 用法: .\scripts\build.ps1              # 首次运行，自动下载工具链
-#       .\scripts\build.ps1 -Clean       # 清理后重新构建
-#       .\scripts\build.ps1 -DryRun      # 仅检测，不实际构建
-# =============================================================================
 param(
-    [switch]$Clean,       # 清理所有构建缓存和工具链
-    [switch]$DryRun       # 仅检测环境，不构建
+    [string]$Version = "0.2.0",
+    [ValidateSet("offline", "cdn")]
+    [string]$Bundle = "offline",
+    [switch]$SkipDownloads,
+    [switch]$Clean
 )
 
 $ErrorActionPreference = "Stop"
-$Script:BuildStart = Get-Date
 
-# =============================================================================
-# 配置
-# =============================================================================
-$TOOLS_DIR   = "$PSScriptRoot\..\.tools"          # 便携工具链目录（不污染系统）
-$DOTNET_DIR  = "$TOOLS_DIR\dotnet"
-$ISCC_DIR    = "$TOOLS_DIR\innosetup"
-$NUGET_CACHE = "$TOOLS_DIR\nuget-cache"
+$Script:ProjectRoot = Split-Path $PSScriptRoot -Parent
+$Script:CacheDir = Join-Path $Script:ProjectRoot "scripts\_cache"
+$Script:ReleaseRoot = Join-Path $Script:ProjectRoot "release"
+$bundleLabel = if ($Bundle -eq "cdn") { "CDN" } else { "Offline" }
+$Script:StageDir = Join-Path $Script:ReleaseRoot "HermesAgent-$bundleLabel-v$Version"
+$Script:ZipPath = Join-Path $Script:ReleaseRoot "HermesAgent-$bundleLabel-v$Version.zip"
+$Script:ConfigDir = Join-Path $Script:ProjectRoot "config"
+$Script:ConfigPath = Join-Path $Script:ConfigDir "release.$Bundle.json"
+$Script:DefaultConfigPath = Join-Path $Script:ConfigDir "release.json"
+$Script:GuiProject = Join-Path $Script:ProjectRoot "gui\HermesInstaller\HermesInstaller.csproj"
+$Script:GuiPublishDir = Join-Path $Script:ReleaseRoot ".gui-publish\$Bundle-$Version"
 
-$DOTNET_VERSION = "8.0"
-$DOTNET_INSTALL_URL = "https://dot.net/v1/dotnet-install.ps1"
-$INNO_URL = "https://files.jrsoftware.org/is/6/innosetup-6.2.2.exe"
+$assets = @(
+    @{ Name = "hermes-agent.tar.gz"; Url = "http://121.40.165.216/hermes-cdn/files/hermes-agent.tar.gz" },
+    @{ Name = "hermes-web-ui.tgz"; Url = "http://121.40.165.216/hermes-cdn/files/hermes-web-ui.tgz" },
+    @{ Name = "wsl.2.6.3.0.x64.msi"; Url = "http://121.40.165.216/hermes-cdn/files/wsl.2.6.3.0.x64.msi" },
+    @{ Name = "wsl_update_x64.msi"; Url = "http://121.40.165.216/hermes-cdn/files/wsl_update_x64.msi" },
+    @{ Name = "ubuntu-noble-wsl-amd64.wsl"; Url = "http://121.40.165.216/hermes-cdn/files/ubuntu-noble-wsl-amd64.wsl" },
+    @{ Name = "setup-node23.x"; Url = "https://deb.nodesource.com/setup_23.x" }
+)
 
-$SOLUTION   = "$PSScriptRoot\..\gui\HermesInstaller\HermesInstaller.csproj"
-$ISS_SCRIPT = "$PSScriptRoot\..\installer\hermes-installer.iss"
-$OUTPUT_DIR = "$PSScriptRoot\..\installer\output"
+function Write-Step {
+    param(
+        [string]$Message,
+        [ValidateSet("start", "ok", "warn", "error", "skip", "info")]
+        [string]$Status = "info"
+    )
 
-# =============================================================================
-# 工具函数
-# =============================================================================
+    $prefix = switch ($Status) {
+        "start" { "[...]" }
+        "ok" { "[OK ]" }
+        "warn" { "[ ! ]" }
+        "error" { "[ERR]" }
+        "skip" { "[ ->]" }
+        default { "[   ]" }
+    }
 
-function Write-Step { param($Msg, $Status="") 
-    $icons = @{ok="[ ✓ ]";err="[ ✗ ]";warn="[ ! ]";skip="[ → ]";info="[ i ]";dl="[ ↓ ]"}
-    $colors = @{ok="Green";err="Red";warn="Yellow";skip="DarkGray";info="Cyan";dl="Cyan"}
-    $icon = if ($icons.ContainsKey($Status)) { $icons[$Status] } else { "[...]" }
-    $color = if ($colors.ContainsKey($Status)) { $colors[$Status] } else { "White" }
-    Write-Host "$icon $Msg" -ForegroundColor $color
+    $color = switch ($Status) {
+        "ok" { "Green" }
+        "warn" { "Yellow" }
+        "error" { "Red" }
+        "skip" { "DarkGray" }
+        default { "White" }
+    }
+
+    Write-Host "$prefix $Message" -ForegroundColor $color
 }
 
 function Invoke-Download {
-    param($Url, $OutFile, $Description="文件")
-    Write-Step "下载 $Description..." "dl"
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $parent = Split-Path $Destination -Parent
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $temp = "$Destination.download"
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromMinutes(30)
+
+    $response = $null
+    $responseStream = $null
+    $fileStream = $null
     try {
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 300
-        Write-Step "$Description 下载完成" "ok"
-        return $true
-    } catch {
-        Write-Host "  错误: $_" -ForegroundColor Red
-        Write-Step "$Description 下载失败" "err"
-        return $false
-    }
-}
+        $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $response.EnsureSuccessStatusCode()
+        $totalBytes = $response.Content.Headers.ContentLength
+        $responseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $fileStream = [System.IO.File]::Open($temp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
 
-function Invoke-Exec {
-    param($Exe, $Args, $Msg="执行命令")
-    Write-Step $Msg "info"
-    $output = & $Exe @Args 2>&1
-    $ok = ($LASTEXITCODE -eq 0)
-    if (-not $ok) { Write-Host "  $output" -ForegroundColor DarkGray }
-    return @{Ok=$ok; Output=$output}
-}
+        $buffer = New-Object byte[] 1048576
+        $downloadedBytes = 0L
+        $lastPercent = -1
 
-# =============================================================================
-# 清理
-# =============================================================================
-function Invoke-Clean {
-    Write-Step "清理构建缓存..." "info"
-    Remove-Item $TOOLS_DIR -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item "$PSScriptRoot\..\gui\HermesInstaller\bin" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item "$PSScriptRoot\..\gui\HermesInstaller\obj" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $OUTPUT_DIR -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Step "清理完成" "ok"
-}
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $read)
+            $downloadedBytes += $read
 
-# =============================================================================
-# Step 1: 自举 dotnet SDK（便携版，不装系统）
-# =============================================================================
-function Step-BootstrapDotnet {
-    Write-Host ""
-    Write-Host "--- .NET SDK ---" -ForegroundColor Cyan
-
-    # 检查系统是否已有 dotnet
-    $systemDotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($systemDotnet) {
-        try {
-            $sysVer = & dotnet --version 2>$null
-            if ($sysVer -and [Version]$sysVer -ge [Version]$DOTNET_VERSION) {
-                Write-Step "dotnet v$sysVer（系统已有）" "ok"
-                return $true
+            if ($totalBytes -and $totalBytes -gt 0) {
+                $percent = [int][Math]::Floor(($downloadedBytes * 100.0) / $totalBytes)
+                if ($percent -ge ($lastPercent + 5) -or $percent -eq 100) {
+                    Write-Progress -Activity $Label -Status "$percent% ($([math]::Round($downloadedBytes / 1MB, 1)) / $([math]::Round($totalBytes / 1MB, 1)) MB)" -PercentComplete $percent
+                    $lastPercent = $percent
+                }
             }
-        } catch {}
-    }
-
-    # 检查 .tools 里的便携版
-    $localDotnet = "$DOTNET_DIR\dotnet.exe"
-    if (Test-Path $localDotnet) {
-        try {
-            $localVer = & $localDotnet --version 2>$null
-            if ($localVer -and [Version]$localVer -ge [Version]$DOTNET_VERSION) {
-                Write-Step "dotnet v$localVer（便携版就绪）" "ok"
-                $env:PATH = "$DOTNET_DIR;$env:PATH"
-                return $true
-            }
-        } catch {}
-    }
-
-    # 下载安装脚本
-    Write-Step "dotnet 未找到或版本过低，开始自举安装..." "info"
-    $installScript = "$env:TEMP\dotnet-install.ps1"
-    if (-not (Invoke-Download $DOTNET_INSTALL_URL $installScript "dotnet-install.ps1")) {
-        return $false
-    }
-
-    # 安装到便携目录（非系统级）
-    New-Item -ItemType Directory -Path $DOTNET_DIR -Force | Out-Null
-    & $installScript -Channel $DOTNET_VERSION -InstallDir $DOTNET_DIR -NoPath
-    Remove-Item $installScript -Force -ErrorAction SilentlyContinue
-
-    if (-not (Test-Path $localDotnet)) {
-        Write-Step "dotnet 安装失败" "err"
-        return $false
-    }
-
-    $env:PATH = "$DOTNET_DIR;$env:PATH"
-    $localVer = & $localDotnet --version 2>$null
-    Write-Step "dotnet v$localVer 已安装到 .tools\dotnet\" "ok"
-    return $true
-}
-
-# =============================================================================
-# Step 2: 自举 Inno Setup（便携版）
-# =============================================================================
-function Step-BootstrapInno {
-    Write-Host ""
-    Write-Host "--- Inno Setup ---" -ForegroundColor Cyan
-
-    # 检查系统是否已有 iscc
-    $sysIscc = Get-Command iscc -ErrorAction SilentlyContinue
-    if (-not $sysIscc) {
-        # 搜索常见安装路径
-        $commonPaths = @(
-            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-            "C:\Program Files\Inno Setup 6\ISCC.exe",
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-        )
-        foreach ($p in $commonPaths) {
-            if (Test-Path $p) { $sysIscc = $p; break }
         }
-    }
-    if ($sysIscc) {
-        Write-Step "Inno Setup 已安装: $sysIscc" "ok"
-        $global:IsccPath = $sysIscc
-        return $true
-    }
 
-    # 检查便携版
-    $localIscc = "$ISCC_DIR\ISCC.exe"
-    if (Test-Path $localIscc) {
-        Write-Step "Inno Setup 便携版就绪" "ok"
-        $global:IsccPath = $localIscc
-        return $true
+        Write-Progress -Activity $Label -Completed
+        Move-Item $temp $Destination -Force
+    } finally {
+        if ($fileStream) { $fileStream.Dispose() }
+        if ($responseStream) { $responseStream.Dispose() }
+        if ($response) { $response.Dispose() }
+        if ($client) { $client.Dispose() }
+        Remove-Item $temp -Force -ErrorAction SilentlyContinue
     }
-
-    # 下载并静默安装到便携目录
-    Write-Step "Inno Setup 未找到，开始自举安装..." "info"
-    $installer = "$env:TEMP\innosetup.exe"
-    if (-not (Invoke-Download $INNO_URL $installer "Inno Setup 6")) {
-        return $false
-    }
-
-    New-Item -ItemType Directory -Path $ISCC_DIR -Force | Out-Null
-    Write-Step "安装 Inno Setup 到 .tools\innosetup..." "info"
-    # 启动安装进程并等待，添加超时保护（120 秒后自动终止）
-    $innoJob = Start-Job -ScriptBlock {
-        param($exe, $args)
-        Start-Process $exe -ArgumentList $args -Wait -PassThru -NoNewWindow
-    } -ArgumentList $installer, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$ISCC_DIR`""
-    $innoJob | Wait-Job -Timeout 120 | Out-Null
-    if ($innoJob.State -eq 'Running') {
-        $innoJob | Stop-Job -PassThru | Remove-Job
-        # Stop-Job 不终止 Start-Process 启动的子进程，需额外清理
-        Get-Process -Name innosetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Write-Step "Inno Setup 安装超时（120s），已终止进程" "err"
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-    $result = $innoJob | Receive-Job
-    $innoJob | Remove-Job
-    if (-not $result -or $result.ExitCode -ne 0) {
-        Write-Step "Inno Setup 安装失败" "err"
-        Remove-Item $installer -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-    Remove-Item $installer -Force -ErrorAction SilentlyContinue
-
-    if (-not (Test-Path $localIscc)) {
-        Write-Step "Inno Setup 安装失败" "err"
-        Write-Host "  手动下载: https://jrsoftware.org/isdl.php" -ForegroundColor Yellow
-        return $false
-    }
-
-    $global:IsccPath = $localIscc
-    Write-Step "Inno Setup 已安装到 .tools\innosetup\" "ok"
-    return $true
 }
 
-# =============================================================================
-# Step 3: NuGet 还原 + 编译 WPF
-# =============================================================================
-function Step-BuildWpf {
-    Write-Host ""
-    Write-Host "--- 编译 WPF 安装向导 ---" -ForegroundColor Cyan
+function Build-Launcher {
+    Write-Step "Publishing HermesInstaller.exe..." "start"
 
-    $dotnet = "$DOTNET_DIR\dotnet.exe"
-    if (-not (Test-Path $dotnet)) { $dotnet = "dotnet" }
+    if (Test-Path $Script:GuiPublishDir) {
+        Remove-Item $Script:GuiPublishDir -Recurse -Force
+    }
 
-    # NuGet 还原
-    $restore = Invoke-Exec $dotnet @("restore", $SOLUTION, "--packages", $NUGET_CACHE) "NuGet 还原"
-    if (-not $restore.Ok) { Write-Step "NuGet 还原失败" "err"; return $false }
-
-    # 编译发布
-    $publishDir = "$PSScriptRoot\..\gui\HermesInstaller\bin\Release\net8.0-windows\publish"
-    $build = Invoke-Exec $dotnet @(
-        "publish", $SOLUTION,
+    $arguments = @(
+        "publish",
+        $Script:GuiProject,
         "-c", "Release",
         "-r", "win-x64",
-        "--self-contained", "false",
-        "-p:PublishSingleFile=false",
-        "-o", $publishDir
-    ) "编译 HermesInstaller.exe"
+        "--self-contained", "true",
+        "-p:PublishSingleFile=true",
+        "-p:IncludeNativeLibrariesForSelfExtract=true",
+        "-o", $Script:GuiPublishDir
+    )
 
-    if (-not $build.Ok) { Write-Step "编译失败" "err"; return $false }
-
-    $exe = "$publishDir\HermesInstaller.exe"
-    if (Test-Path $exe) {
-        $mb = [math]::Round((Get-Item $exe).Length/1MB, 1)
-        Write-Step "编译成功: HermesInstaller.exe (${mb}MB)" "ok"
-        return $true
-    }
-    Write-Step "编译产物缺失" "err"
-    return $false
-}
-
-# =============================================================================
-# Step 4: Inno Setup 打包
-# =============================================================================
-function Step-PackageExe {
-    Write-Host ""
-    Write-Host "--- 打包安装程序 ---" -ForegroundColor Cyan
-
-    $iscc = $global:IsccPath
-    if (-not $iscc) {
-        Write-Step "iscc 路径未找到" "err"
-        return $false
+    & dotnet @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to publish HermesInstaller.exe"
     }
 
-    New-Item -ItemType Directory -Path $OUTPUT_DIR -Force | Out-Null
-    $pkg = Invoke-Exec $iscc @("/O$OUTPUT_DIR", $ISS_SCRIPT) "Inno Setup 打包"
-
-    if (-not $pkg.Ok) { Write-Step "打包失败" "err"; return $false }
-
-    $exe = Get-ChildItem $OUTPUT_DIR -Filter "HermesAgent-Setup-*.exe" | Sort-Object LastWriteTime -Desc | Select-Object -First 1
-    if ($exe) {
-        $mb = [math]::Round($exe.Length/1MB, 1)
-        Write-Step "打包完成: $($exe.Name) (${mb}MB)" "ok"
-        return $true
+    $exePath = Join-Path $Script:GuiPublishDir "HermesInstaller.exe"
+    if (-not (Test-Path $exePath)) {
+        throw "HermesInstaller.exe was not created"
     }
-    Write-Step "打包产物缺失" "err"
-    return $false
+
+    $sizeMb = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
+    Write-Step "HermesInstaller.exe published (${sizeMb} MB)." "ok"
 }
 
-# =============================================================================
-# Step 5: 清理临时文件
-# =============================================================================
-function Step-CleanupTemp {
-    Write-Host ""
-    Write-Step "清理临时文件..." "info"
-    Remove-Item "$env:TEMP\dotnet-install.ps1" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$env:TEMP\innosetup.exe" -Force -ErrorAction SilentlyContinue
-    Write-Step "临时文件已清理" "ok"
+function Ensure-Asset {
+    param([hashtable]$Asset)
+
+    $destination = Join-Path $Script:CacheDir $Asset.Name
+    if (Test-Path $destination) {
+        $sizeMb = [math]::Round((Get-Item $destination).Length / 1MB, 1)
+        Write-Step "$($Asset.Name) already cached (${sizeMb} MB)." "skip"
+        return
+    }
+
+    if ($SkipDownloads) {
+        throw "Missing cached asset: $($Asset.Name)"
+    }
+
+    Write-Step "Downloading $($Asset.Name)..." "start"
+    Invoke-Download -Url $Asset.Url -Destination $destination -Label "Downloading $($Asset.Name)"
+    $sizeMb = [math]::Round((Get-Item $destination).Length / 1MB, 1)
+    Write-Step "$($Asset.Name) downloaded (${sizeMb} MB)." "ok"
 }
 
-# =============================================================================
-# 主流程
-# =============================================================================
+function New-ReleaseConfig {
+    if (-not (Test-Path $Script:ConfigDir)) {
+        New-Item -ItemType Directory -Path $Script:ConfigDir -Force | Out-Null
+    }
+
+    $notes = if ($Bundle -eq "offline") {
+        @(
+            "Offline release bundle for Windows 10/11 simulator testing.",
+            "Installer prefers local cache first and only falls back to network when a local asset is missing."
+        )
+    } else {
+        @(
+            "CDN release bundle for Windows 10/11 installer distribution.",
+            "Installer fetches runtime assets from the configured CDN base."
+        )
+    }
+
+    $config = [ordered]@{
+        mode = $Bundle
+        cdnBase = "http://121.40.165.216/hermes-cdn/files"
+        distro = "Ubuntu-24.04"
+        port = 8648
+        cache = if ($Bundle -eq "offline") {
+            [ordered]@{
+                hermesArchive = "scripts/_cache/hermes-agent.tar.gz"
+                webUiArchive = "scripts/_cache/hermes-web-ui.tgz"
+                wslMsi = "scripts/_cache/wsl.2.6.3.0.x64.msi"
+                wslKernelMsi = "scripts/_cache/wsl_update_x64.msi"
+                ubuntuImage = "scripts/_cache/ubuntu-noble-wsl-amd64.wsl"
+                nodeSetup = "scripts/_cache/setup-node23.x"
+            }
+        } else {
+            [ordered]@{
+                hermesArchive = ""
+                webUiArchive = ""
+                wslMsi = ""
+                wslKernelMsi = ""
+                ubuntuImage = ""
+                nodeSetup = ""
+            }
+        }
+        notes = $notes
+    }
+
+    $json = $config | ConvertTo-Json -Depth 5
+    $json | Set-Content -Path $Script:ConfigPath -Encoding UTF8
+    $json | Set-Content -Path $Script:DefaultConfigPath -Encoding UTF8
+    Write-Step "Wrote release config: $Script:ConfigPath" "ok"
+}
+
+function Copy-ReleaseFiles {
+    if (Test-Path $Script:StageDir) {
+        Remove-Item $Script:StageDir -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $Script:StageDir -Force | Out-Null
+
+    $pathsToCopy = @("scripts", "docs", "desktop", "config", "README.md", ".gitattributes")
+    foreach ($path in $pathsToCopy) {
+        $source = Join-Path $Script:ProjectRoot $path
+        if (Test-Path $source) {
+            $destination = Join-Path $Script:StageDir $path
+            Copy-Item $source $destination -Recurse -Force
+        }
+    }
+
+    $launcherPath = Join-Path $Script:GuiPublishDir "HermesInstaller.exe"
+    if (Test-Path $launcherPath) {
+        Copy-Item $launcherPath (Join-Path $Script:StageDir "HermesInstaller.exe") -Force
+    }
+
+    if ($Bundle -eq "cdn") {
+        $cachePath = Join-Path $Script:StageDir "scripts\_cache"
+        if (Test-Path $cachePath) {
+            Remove-Item $cachePath -Recurse -Force
+        }
+    }
+
+    Write-Step "Copied release payload into staging directory." "ok"
+}
+
+function New-Checksums {
+    $cacheRoot = Join-Path $Script:StageDir "scripts\_cache"
+    if (-not (Test-Path $cacheRoot)) {
+        return
+    }
+
+    $files = Get-ChildItem -Path $cacheRoot -File
+    $output = @()
+    foreach ($file in $files) {
+        $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $relative = $file.FullName.Substring($Script:StageDir.Length + 1).Replace("\", "/")
+        $output += "$hash  $relative"
+    }
+
+    $checksumPath = Join-Path $Script:StageDir "files.sha256"
+    $output | Set-Content -Path $checksumPath -Encoding ascii
+    Write-Step "Generated checksum manifest." "ok"
+}
+
+function New-ReleaseReadme {
+    $content = @'
+# Hermes Agent BUNDLE Release v$Version
+
+## What is included
+
+- `scripts/install-hermes.ps1`: main installer entry
+- `config/release.BUNDLE.json`: bundled environment config
+- `docs/`: project docs
+- `desktop/`: desktop integration helpers
+EXTRA_ASSETS
+
+## Simulator test steps
+
+1. Extract this zip to a local folder.
+2. Open PowerShell as Administrator.
+3. Run:
+
+```powershell
+cd .\HermesAgent-BUNDLE-vVERSION
+.\scripts\install-hermes.ps1
+```
+
+4. After install completes, open the URL printed by the script.
+
+## Notes
+
+- In `offline` bundles, the installer prefers local cache assets first.
+- In `cdn` bundles, the installer downloads runtime assets from `cdnBase`.
+'@
+    $extraAssets = if ($Bundle -eq "offline") {
+@'
+- `scripts/_cache/hermes-agent.tar.gz`: Hermes core package
+- `scripts/_cache/hermes-web-ui.tgz`: Hermes Web UI package
+- `scripts/_cache/wsl.2.6.3.0.x64.msi`: WSL installer
+- `scripts/_cache/wsl_update_x64.msi`: WSL kernel update
+- `scripts/_cache/ubuntu-noble-wsl-amd64.wsl`: Ubuntu 24.04 image
+- `scripts/_cache/setup-node23.x`: NodeSource bootstrap script
+- `files.sha256`: asset checksum list
+'@
+    } else {
+@'
+- No bundled large runtime archives
+- Uses your CDN resources from `cdnBase`
+'@
+    }
+    $content = $content.Replace('v$Version', "v$Version").Replace("vVERSION", "v$Version").Replace("BUNDLE", $bundleLabel).Replace("EXTRA_ASSETS", $extraAssets)
+
+    Set-Content -Path (Join-Path $Script:StageDir "RELEASE-NOTES.md") -Value $content -Encoding UTF8
+    Write-Step "Wrote release notes." "ok"
+}
+
+function New-ReleaseZip {
+    if (Test-Path $Script:ZipPath) {
+        Remove-Item $Script:ZipPath -Force
+    }
+
+    Compress-Archive -Path (Join-Path $Script:StageDir "*") -DestinationPath $Script:ZipPath -CompressionLevel Optimal
+    Write-Step "Created release zip: $Script:ZipPath" "ok"
+}
+
 function Main {
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║   Hermes Installer — 自举构建（零手动）   ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
-    Write-Host ""
-
     if ($Clean) {
-        Invoke-Clean
-        Write-Host "清理完成，重新运行 build.ps1 开始构建" -ForegroundColor Green
+        Remove-Item $Script:ReleaseRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Step "Cleaned release directory." "ok"
         return
     }
 
-    Write-Step "工具链目录: $TOOLS_DIR" "info"
-    Write-Step "首次运行会自动下载 dotnet + Inno Setup（约 300MB）" "info"
-    Write-Host ""
-
-    # 自举工具链
-    if (-not (Step-BootstrapDotnet)) { Write-Host "构建中止" -ForegroundColor Red; return }
-    if (-not (Step-BootstrapInno))  { Write-Host "构建中止" -ForegroundColor Red; return }
-
-    if ($DryRun) {
-        Write-Host ""
-        Write-Step "环境检测通过，可以构建" "ok"
-        return
+    if (-not (Test-Path $Script:CacheDir)) {
+        New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null
+    }
+    if (-not (Test-Path $Script:ReleaseRoot)) {
+        New-Item -ItemType Directory -Path $Script:ReleaseRoot -Force | Out-Null
     }
 
-    # 构建流水线
-    if (-not (Step-BuildWpf))   { Write-Host "构建中止" -ForegroundColor Red; return }
-    if (-not (Step-PackageExe)) { Write-Host "构建中止" -ForegroundColor Red; return }
+    Build-Launcher
 
-    Step-CleanupTemp
-
-    # 完成
-    $elapsed = [math]::Round(((Get-Date) - $Script:BuildStart).TotalSeconds, 1)
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Green
-    Write-Host "║    构建完成！ ${elapsed}s                       ║" -ForegroundColor Green
-    Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  输出: $OUTPUT_DIR\" -ForegroundColor White
-    Get-ChildItem $OUTPUT_DIR -Filter "*.exe" | ForEach-Object {
-        Write-Host "    → $($_.Name) ($([math]::Round($_.Length/1MB,1))MB)" -ForegroundColor Green
+    if ($Bundle -eq "offline") {
+        foreach ($asset in $assets) {
+            Ensure-Asset -Asset $asset
+        }
     }
+
+    New-ReleaseConfig
+    Copy-ReleaseFiles
+    New-Checksums
+    New-ReleaseReadme
+    New-ReleaseZip
+
     Write-Host ""
+    Write-Step "Offline release is ready." "ok"
+    Write-Host "Stage: $Script:StageDir"
+    Write-Host "Zip:   $Script:ZipPath"
 }
 
 Main
