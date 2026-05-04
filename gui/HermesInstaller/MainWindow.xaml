@@ -117,10 +117,6 @@
         <!-- ══ 状态卡片 ══ -->
         <Border Grid.Row="1" Margin="16,14,16,0" Background="White"
                 CornerRadius="12" BorderBrush="#E5E7EB" BorderThickness="1">
-            <Border.Effect>
-                <DropShadowEffect Color="#000000" Opacity="0.06"
-                                  BlurRadius="14" ShadowDepth="2" Direction="270"/>
-            </Border.Effect>
             <Grid Margin="20,16">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>

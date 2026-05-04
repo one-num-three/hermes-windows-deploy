@@ -10,6 +10,7 @@
     <Version>0.2.2</Version>
     <Authors>Hermes Community</Authors>
     <Description>Hermes Agent Windows installer launcher</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <EnableDefaultPageItems>false</EnableDefaultPageItems>
     <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>

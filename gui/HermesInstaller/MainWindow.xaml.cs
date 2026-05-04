@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private readonly string _statePath;
     private readonly DispatcherTimer _logTimer;
     private Process? _installProcess;
+    private long _logReadPosition;
 
     private static readonly SolidColorBrush BrushIdle    = new(Color.FromRgb(0x10, 0xB9, 0x81)); // 绿
     private static readonly SolidColorBrush BrushRunning = new(Color.FromRgb(0xF5, 0x9E, 0x0B)); // 琥珀
@@ -38,8 +39,6 @@ public partial class MainWindow : Window
 
         _logTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
         _logTimer.Tick += (_, _) => RefreshLog();
-
-        RefreshLog();
     }
 
     private void StartButton_Click(object sender, RoutedEventArgs e)
@@ -62,27 +61,27 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // 清除上次日志
+            // 清除上次日志，重置增量读取位置
             try { if (File.Exists(_logPath)) File.Delete(_logPath); } catch { }
+            _logReadPosition = 0;
 
+            // app.manifest 已确保以管理员身份运行，直接用 CreateProcess（避免 ShellExecuteEx 阻塞 UI）
             var startInfo = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
                 Arguments = $"-ExecutionPolicy Bypass -NoProfile -File \"{_scriptPath}\" -Unattended",
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden,
+                UseShellExecute = false,
+                CreateNoWindow = true,
                 WorkingDirectory = _baseDirectory
             };
 
             _installProcess = Process.Start(startInfo);
             if (_installProcess is null)
-                throw new InvalidOperationException("无法启动安装进程（可能被 UAC 拒绝）。");
+                throw new InvalidOperationException("无法启动安装进程。");
 
             _installProcess.EnableRaisingEvents = true;
             _installProcess.Exited += InstallProcess_Exited;
 
-            // 更新 UI 为「安装中」状态
             StartButton.IsEnabled = false;
             OpenUiButton.IsEnabled = false;
             StatusDot.Fill = BrushRunning;
@@ -149,11 +148,14 @@ public partial class MainWindow : Window
         try
         {
             using var stream = new FileStream(_logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (stream.Length <= _logReadPosition) return;
+            stream.Seek(_logReadPosition, SeekOrigin.Begin);
             using var reader = new StreamReader(stream);
-            var text = reader.ReadToEnd();
-            if (LogTextBox.Text != text)
+            var newText = reader.ReadToEnd();
+            _logReadPosition = stream.Length;
+            if (!string.IsNullOrEmpty(newText))
             {
-                LogTextBox.Text = text;
+                LogTextBox.AppendText(newText);
                 LogTextBox.ScrollToEnd();
             }
         }

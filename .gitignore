@@ -16,6 +16,10 @@ installer/output/
 .tools/
 bin/
 obj/
+release/
+HermesInstaller.exe
+ui-temp/
+*.log
 
 # Temporary files
 *.tmp
