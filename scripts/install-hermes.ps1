@@ -14,10 +14,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 # 尽早开始记录，确保任何崩溃都有日志
-$_earlyLog = if ($LogPath) { $LogPath } else { "$env:USERPROFILE\hermes-install.log" }
-try { Start-Transcript -Path $_earlyLog -Append -Force | Out-Null } catch {}
-
-
 function Resolve-WslExePath {
     $candidates = @(
         "C:\Program Files\WSL\wsl.exe",
@@ -75,6 +71,168 @@ function Append-LogLine {
 
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::AppendAllText($LogPath, $Text + [Environment]::NewLine, $utf8NoBom)
+}
+
+function Write-ConsoleLine {
+    param(
+        [string]$Text,
+        [string]$Color = "White"
+    )
+
+    if ($Unattended) {
+        return
+    }
+
+    try {
+        Write-Host $Text -ForegroundColor $Color
+    } catch {
+        # In headless or partially initialized hosts, console color APIs can fail or hang.
+        # Fall back to plain output only for interactive runs.
+        try {
+            [Console]::WriteLine($Text)
+        } catch {
+            # Ignore console write failures; the log file remains the source of truth.
+        }
+    }
+}
+
+function Normalize-ExternalOutputLine {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $text = $text -replace "`0", ""
+    $text = $text -replace "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""
+    $text = $text.TrimEnd()
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    return $text
+}
+
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return (($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        } else {
+            $_
+        }
+    }) -join ' ')
+}
+
+function Invoke-ProcessWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [int]$TimeoutSeconds = 60,
+        [string]$Label = "process",
+        [switch]$IgnoreExitCode
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+
+    try {
+        [void]$process.Start()
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try {
+                $process.Kill()
+                $process.WaitForExit()
+            } catch {
+                # Ignore kill failures while timing out.
+            }
+
+            $message = "$Label timed out after ${TimeoutSeconds}s."
+            Append-LogLine -Text ("{0} [ ! ] {1}" -f (Get-Date -Format "HH:mm:ss"), $message)
+            return [PSCustomObject]@{
+                TimedOut = $true
+                ExitCode = -1
+                Output   = @($message)
+            }
+        }
+
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $output = @()
+        if ($stdout) { $output += ($stdout -split "[`r`n]+") }
+        if ($stderr) { $output += ($stderr -split "[`r`n]+") }
+
+        $normalized = $output |
+            ForEach-Object { Normalize-ExternalOutputLine $_ } |
+            Where-Object { $_ }
+
+        foreach ($line in $normalized) {
+            Append-LogLine -Text $line
+        }
+
+        if (-not $IgnoreExitCode -and $process.ExitCode -ne 0) {
+            throw "$Label failed with exit code $($process.ExitCode)."
+        }
+
+        return [PSCustomObject]@{
+            TimedOut = $false
+            ExitCode = $process.ExitCode
+            Output   = @($normalized)
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Restart-WindowsServiceWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$TimeoutSeconds = 45
+    )
+
+    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $service) {
+        Write-Step "Windows service $Name was not found." "warn"
+        return
+    }
+
+    try {
+        if ($service.Status -eq "Running") {
+            Restart-Service -Name $Name -Force -ErrorAction Stop
+        } else {
+            Start-Service -Name $Name -ErrorAction Stop
+        }
+    } catch {
+        Write-Step "Could not request restart for ${Name}: $($_.Exception.Message)" "warn"
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Seconds 1
+        $service.Refresh()
+        if ($service.Status -eq "Running") {
+            Write-Step "Windows service $Name is running again." "info"
+            return
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    Write-Step "Windows service $Name did not reach Running state within ${TimeoutSeconds}s." "warn"
 }
 
 function Invoke-DownloadWithProgress {
@@ -248,7 +406,7 @@ function Write-Step {
         default { "White" }
     }
 
-    Write-Host $line -ForegroundColor $color
+    Write-ConsoleLine -Text $line -Color $color
     Append-LogLine -Text $line
 }
 
@@ -287,7 +445,10 @@ function Invoke-WslCommand {
     $output = & $Script:WslExe -d $Script:WslDistro -u $User -- bash -lc $Command 2>&1
     $exitCode = $LASTEXITCODE
     if ($output) {
-        $output | ForEach-Object { Append-LogLine -Text ([string]$_) }
+        $output |
+            ForEach-Object { Normalize-ExternalOutputLine $_ } |
+            Where-Object { $_ } |
+            ForEach-Object { Append-LogLine -Text $_ }
     }
     if (-not $IgnoreExitCode -and $exitCode -ne 0) {
         throw "WSL command failed (exit $exitCode): $Command"
@@ -307,23 +468,87 @@ function Invoke-WslScript {
 
     $tempFile = Join-Path $env:TEMP ("hermes-" + [guid]::NewGuid().ToString() + ".sh")
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($tempFile, $Content, $utf8NoBom)
+    $unixContent = $Content -replace "`r`n", "`n"
+    $unixContent = $unixContent -replace "`r", "`n"
+    [System.IO.File]::WriteAllText($tempFile, $unixContent, $utf8NoBom)
+    $stdoutPath = Join-Path $env:TEMP ("hermes-" + [guid]::NewGuid().ToString() + ".stdout.log")
+    $stderrPath = Join-Path $env:TEMP ("hermes-" + [guid]::NewGuid().ToString() + ".stderr.log")
     try {
+        Write-Step "Invoke-WslScript BEGIN temp=$tempFile user=$User" "info"
         $wslPath = Convert-ToWslPath $tempFile
-        $output = & $Script:WslExe -d $Script:WslDistro -u $User -- bash $wslPath 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($output) {
-            $output | ForEach-Object { Append-LogLine -Text ([string]$_) }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $Script:WslExe
+        $psi.Arguments = Join-ProcessArguments -Arguments @("-d", $Script:WslDistro, "-u", $User, "--", "bash", $wslPath)
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        [void]$process.Start()
+        Write-Step "Invoke-WslScript launched pid=$($process.Id) wslPath=$wslPath" "info"
+
+        $output = New-Object System.Collections.Generic.List[string]
+        $syncRoot = New-Object object
+        $onLine = {
+            param([string]$Line)
+            $normalized = Normalize-ExternalOutputLine $Line
+            if ($normalized) {
+                Append-LogLine -Text $normalized
+                [System.Threading.Monitor]::Enter($syncRoot)
+                try {
+                    [void]$output.Add($normalized)
+                } finally {
+                    [System.Threading.Monitor]::Exit($syncRoot)
+                }
+            }
         }
+
+        Write-Step "Invoke-WslScript attaching stdout/stderr readers for pid=$($process.Id)" "info"
+        $stdoutTask = [System.Threading.Tasks.Task]::Run([Action]{
+            try {
+                while (($line = $process.StandardOutput.ReadLine()) -ne $null) {
+                    & $onLine $line
+                }
+            } catch {
+                & $onLine ("[reader] stdout exception: " + $_.Exception.Message)
+            }
+        })
+        $stderrTask = [System.Threading.Tasks.Task]::Run([Action]{
+            try {
+                while (($line = $process.StandardError.ReadLine()) -ne $null) {
+                    & $onLine $line
+                }
+            } catch {
+                & $onLine ("[reader] stderr exception: " + $_.Exception.Message)
+            }
+        })
+
+        $waitStartedAt = Get-Date
+        while (-not $process.WaitForExit(5000)) {
+            $runningFor = [int]((Get-Date) - $waitStartedAt).TotalSeconds
+            Write-Step "Invoke-WslScript waiting on pid=$($process.Id) for ${runningFor}s..." "info"
+        }
+        $process.WaitForExit()
+        try {
+            [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000)
+        } catch {
+            Write-Step "Invoke-WslScript reader wait did not complete cleanly: $($_.Exception.Message)" "warn"
+        }
+        $exitCode = $process.ExitCode
+        Write-Step "Invoke-WslScript END pid=$($process.Id) exit=$exitCode outputLines=$($output.Count)" "info"
+
         if (-not $IgnoreExitCode -and $exitCode -ne 0) {
             throw "WSL script failed (exit $exitCode): $tempFile"
         }
         return [PSCustomObject]@{
             ExitCode = $exitCode
-            Output   = $output
+            Output   = @($output)
         }
     } finally {
         Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -335,64 +560,45 @@ function Wait-HttpReady {
     )
 
     for ($i = 1; $i -le $Attempts; $i++) {
+        Write-Step "HTTP readiness probe $i/$Attempts for $Url" "info"
         try {
             $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+                Write-Step "HTTP readiness probe succeeded with status $($response.StatusCode)." "ok"
                 return $true
             }
         } catch {
+            Write-Step "HTTP readiness probe $i/$Attempts did not succeed yet: $($_.Exception.Message)" "warn"
             Start-Sleep -Seconds $DelaySeconds
         }
     }
+    Write-Step "HTTP readiness probes exhausted for $Url." "warn"
     return $false
+}
+
+function Test-WslResponsiveProbe {
+    param([int]$TimeoutSeconds = 45)
+
+    $result = Invoke-ProcessWithTimeout `
+        -FilePath $Script:WslExe `
+        -Arguments @("-d", $Script:WslDistro, "-u", "root", "--", "bash", "-lc", "true") `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label "WSL startup probe" `
+        -IgnoreExitCode
+
+    return [PSCustomObject]@{
+        ExitCode = $result.ExitCode
+        Output   = $result.Output
+    }
 }
 
 function Get-WebUiLoginUrl {
     $tokenScript = @'
+#!/bin/bash
+set -e
+out_file="$1"
 mkdir -p /root/.hermes-web-ui
 token_file="/root/.hermes-web-ui/.token"
-running_token=""
-
-if [ -f "$token_file" ]; then
-  file_token=$(tr -d '\r\n' <"$token_file")
-  if printf '%s' "$file_token" | grep -Eq '^[0-9a-f]{64}$'; then
-    printf '%s' "$file_token"
-    exit 0
-  fi
-fi
-
-running_token=$(python3 - <<'PY'
-from pathlib import Path
-
-needle = b"/opt/hermes/hermes-web-ui/dist/server/index.js"
-for cmdline in Path("/proc").glob("*/cmdline"):
-    try:
-        data = cmdline.read_bytes()
-    except OSError:
-        continue
-    if needle not in data:
-        continue
-
-    environ = cmdline.parent / "environ"
-    try:
-        env_data = environ.read_bytes().split(b"\0")
-    except OSError:
-        continue
-
-    for entry in env_data:
-        if entry.startswith(b"AUTH_TOKEN="):
-            token = entry.split(b"=", 1)[1].decode("utf-8", "ignore").strip()
-            print(token)
-            raise SystemExit(0)
-PY
-)
-
-if printf '%s' "$running_token" | grep -Eq '^[0-9a-f]{64}$'; then
-  printf '%s\n' "$running_token" > "$token_file"
-  chmod 600 "$token_file"
-  printf '%s' "$running_token"
-  exit 0
-fi
 
 if [ ! -f "$token_file" ] || ! tr -d '\r\n' <"$token_file" | grep -Eq '^[0-9a-f]{64}$'; then
   python3 - <<'PY' > /root/.hermes-web-ui/.token
@@ -401,15 +607,45 @@ print(secrets.token_hex(32))
 PY
   chmod 600 /root/.hermes-web-ui/.token
 fi
-tr -d '\r\n' <"$token_file"
+tr -d '\r\n' <"$token_file" > "$out_file"
 '@
 
-    $result = Invoke-WslScript -Content $tokenScript -IgnoreExitCode
-    $token = (($result.Output | Out-String).Trim())
-    if ($token) {
-        return "http://localhost:$Script:Port/#/?token=$token"
+    $tempScript = Join-Path $env:TEMP ("hermes-token-" + [guid]::NewGuid().ToString() + ".sh")
+    $tempOut = Join-Path $env:TEMP ("hermes-token-" + [guid]::NewGuid().ToString() + ".txt")
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+    try {
+        $unixScript = $tokenScript -replace "`r`n", "`n"
+        $unixScript = $unixScript -replace "`r", "`n"
+        [System.IO.File]::WriteAllText($tempScript, $unixScript, $utf8NoBom)
+
+        $scriptWsl = Convert-ToWslPath $tempScript
+        $outWsl = Convert-ToWslPath $tempOut
+        $output = & $Script:WslExe -d $Script:WslDistro -u root -- bash $scriptWsl $outWsl 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($output) {
+            $output |
+                ForEach-Object { Normalize-ExternalOutputLine $_ } |
+                Where-Object { $_ } |
+                ForEach-Object { Append-LogLine -Text $_ }
+        }
+        if ($exitCode -ne 0) {
+            Write-Step "Could not read Web UI token from WSL (exit $exitCode)." "warn"
+            return "http://localhost:$Script:Port"
+        }
+
+        if (Test-Path $tempOut) {
+            $raw = Get-Content -LiteralPath $tempOut -Raw -ErrorAction SilentlyContinue
+            $match = [regex]::Match([string]$raw, "[0-9a-f]{64}")
+            if ($match.Success) {
+                return "http://localhost:$Script:Port/#/?token=$($match.Value)&lang=zh"
+            }
+        }
+    } finally {
+        Remove-Item $tempScript, $tempOut -Force -ErrorAction SilentlyContinue
     }
 
+    Write-Step "Web UI token was not found. Falling back to plain URL." "warn"
     return "http://localhost:$Script:Port"
 }
 
@@ -500,7 +736,16 @@ function Ensure-WslInstalled {
         }
     }
 
-    & $Script:WslExe --set-default-version 2 2>&1 | Out-File $LogPath -Append
+    $setDefaultOutput = & $Script:WslExe --set-default-version 2 2>&1
+    $setDefaultExitCode = $LASTEXITCODE
+    if ($setDefaultExitCode -ne 0) {
+        $setDefaultOutput |
+            ForEach-Object { Normalize-ExternalOutputLine $_ } |
+            Where-Object { $_ } |
+            ForEach-Object { Append-LogLine -Text $_ }
+        throw "Failed to set WSL default version to 2."
+    }
+    Write-Step "WSL default version is set to 2." "info"
     Write-Step "WSL is available." "ok"
 }
 
@@ -533,9 +778,13 @@ function Ensure-UbuntuInstalled {
             throw "Failed to import bundled Ubuntu image for $Script:WslDistro."
         }
     } else {
-        Write-Step "Installing $Script:WslDistro..." "start"
-        & $Script:WslExe --install -d $Script:WslDistro 2>&1 | Out-File $LogPath -Append
-        if ($LASTEXITCODE -ne 0) {
+        if ($Unattended) {
+            throw "$Script:WslDistro is missing and no bundled Ubuntu image is available. Interactive 'wsl --install -d $Script:WslDistro' is disabled in unattended mode."
+        }
+
+        Write-Step "Installing $Script:WslDistro interactively..." "start"
+        $installResult = Invoke-ProcessWithTimeout -FilePath $Script:WslExe -Arguments @("--install", "-d", $Script:WslDistro) -TimeoutSeconds 900 -Label "Interactive WSL distro install" -IgnoreExitCode
+        if ($installResult.ExitCode -ne 0) {
             throw "Failed to install $Script:WslDistro."
         }
 
@@ -548,10 +797,17 @@ function Ensure-UbuntuInstalled {
 function Ensure-WslResponsive {
     Write-Step "Starting WSL distro..." "start"
 
-    & $Script:WslExe --shutdown 2>&1 | Out-File $LogPath -Append
+    $shutdownResult = Invoke-ProcessWithTimeout -FilePath $Script:WslExe -Arguments @("--shutdown") -TimeoutSeconds 20 -Label "WSL shutdown" -IgnoreExitCode
+    if ($shutdownResult.TimedOut) {
+        Write-Step "WSL shutdown timed out. Continuing with startup probes anyway." "warn"
+    } elseif ($shutdownResult.ExitCode -ne 0) {
+        Write-Step "WSL shutdown returned exit code $($shutdownResult.ExitCode). Continuing with startup probes." "warn"
+    }
 
     for ($attempt = 1; $attempt -le 6; $attempt++) {
-        $result = Invoke-WslCommand -Command "true" -IgnoreExitCode
+        Write-Step "WSL startup probe $attempt/6..." "info"
+        $probeTimeout = if ($attempt -le 2) { 60 } else { 45 }
+        $result = Test-WslResponsiveProbe -TimeoutSeconds $probeTimeout
         if ($result.ExitCode -eq 0) {
             Write-Step "WSL distro is ready." "ok"
             return
@@ -561,24 +817,17 @@ function Ensure-WslResponsive {
         if ($outputText -match "HCS_E_SERVICE_NOT_AVAILABLE") {
             Write-Step "WSL backend is not ready yet. Restarting WSL services (attempt $attempt/6)..." "warn"
             foreach ($serviceName in @("WSLService", "vmcompute")) {
-                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-                if ($service) {
-                    try {
-                        if ($service.Status -eq "Running") {
-                            Restart-Service -Name $serviceName -Force -ErrorAction Stop
-                        } else {
-                            Start-Service -Name $serviceName -ErrorAction Stop
-                        }
-                    } catch {
-                        Write-Step "Could not restart service ${serviceName}: $($_.Exception.Message)" "warn"
-                    }
-                }
+                Restart-WindowsServiceWithTimeout -Name $serviceName -TimeoutSeconds 45
             }
+        } elseif ($result.ExitCode -eq -1) {
+            Write-Step "WSL startup probe $attempt/6 timed out after ${probeTimeout}s. Retrying..." "warn"
         } else {
             Write-Step "WSL startup attempt $attempt/6 failed. Retrying..." "warn"
         }
 
-        Start-Sleep -Seconds ([Math]::Min(3 * $attempt, 15))
+        $delay = [Math]::Min(3 * $attempt, 15)
+        Write-Step "Waiting ${delay}s before the next WSL probe..." "info"
+        Start-Sleep -Seconds $delay
     }
 
     throw "WSL did not become responsive. If this happened right after a reboot, wait 15-30 seconds and run the installer again."
@@ -586,6 +835,7 @@ function Ensure-WslResponsive {
 
 function Install-HermesStack {
     Write-Step "Installing Hermes core and hermes-web-ui..." "start"
+    Write-Step "Install-HermesStack: preparing WSL installer script..." "info"
 
     $installScript = @'
 #!/bin/bash
@@ -597,6 +847,9 @@ INSTALL_ROOT="/opt/hermes"
 AGENT_DIR="$INSTALL_ROOT/hermes-agent"
 WEBUI_DIR="$INSTALL_ROOT/hermes-web-ui"
 DATA_DIR="/root/.hermes"
+
+echo "[hermes-stack] BEGIN"
+echo "[hermes-stack] INSTALL_ROOT=$INSTALL_ROOT"
 
 install_from_archive() {
   local name="$1"
@@ -673,6 +926,35 @@ is_webui_installed() {
   command -v hermes-web-ui >/dev/null 2>&1
 }
 
+echo "[hermes-stack] checking installed state"
+
+hermes_ready=0
+webui_ready=0
+
+if is_hermes_installed; then
+  hermes_ready=1
+fi
+
+if is_webui_installed; then
+  webui_ready=1
+fi
+
+if [ "$hermes_ready" = "1" ]; then
+  echo "Hermes core already installed, skipping reinstall."
+fi
+
+if [ "$webui_ready" = "1" ]; then
+  echo "Hermes Web UI already installed, skipping reinstall."
+fi
+
+if [ "$hermes_ready" = "1" ] && [ "$webui_ready" = "1" ]; then
+  echo "Hermes runtime is already present. Skipping package install steps."
+  echo "[hermes-stack] END early-skip"
+  exit 0
+fi
+
+echo "[hermes-stack] package install path entered"
+
 if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
   sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources || true
   sed -i 's|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources || true
@@ -680,6 +962,7 @@ fi
 
 apt-get update
 apt-get install -y ca-certificates curl git python3 python3-pip python3-venv build-essential
+echo "[hermes-stack] base packages ready"
 
 if ! command -v node >/dev/null 2>&1 || ! node --version 2>/dev/null | grep -Eq '^v2(3|4)\.'; then
   if [ -f "__NODE_SETUP__" ]; then
@@ -689,12 +972,15 @@ if ! command -v node >/dev/null 2>&1 || ! node --version 2>/dev/null | grep -Eq 
   fi
   apt-get install -y nodejs
 fi
+echo "[hermes-stack] node ready"
 
 mkdir -p "$INSTALL_ROOT" "$DATA_DIR" /var/log/hermes
+echo "[hermes-stack] directories ready"
 
-if is_hermes_installed; then
-  echo "Hermes core already installed, skipping reinstall."
+if [ "$hermes_ready" = "1" ]; then
+  echo "Hermes core install step skipped."
 else
+  echo "[hermes-stack] installing Hermes core"
   install_from_archive "Hermes core" "$AGENT_DIR" "__HERMES_ARCHIVE__" "__HERMES_ARCHIVE_FALLBACK__"
 
   cd "$AGENT_DIR"
@@ -718,10 +1004,12 @@ exec python3 /opt/hermes/hermes-agent/hermes "$@"
 EOF
   chmod +x /usr/local/bin/hermes
 fi
+echo "[hermes-stack] Hermes core ready"
 
-if is_webui_installed; then
-  echo "Hermes Web UI already installed, skipping reinstall."
+if [ "$webui_ready" = "1" ]; then
+  echo "Hermes Web UI install step skipped."
 else
+  echo "[hermes-stack] installing Hermes Web UI"
   install_from_archive "Hermes Web UI" "$WEBUI_DIR" "__WEBUI_ARCHIVE__" "__WEBUI_ARCHIVE_FALLBACK__"
 
   if [ -d "$WEBUI_DIR/dist" ] && [ -f "$WEBUI_DIR/package.json" ]; then
@@ -735,11 +1023,14 @@ else
     npm install -g "$WEBUI_DIR"
   fi
 fi
+echo "[hermes-stack] Hermes Web UI ready"
+echo "[hermes-stack] END"
 '@
     $nodeSetupSource = if ($Script:NodeSetupPath -and (Test-Path $Script:NodeSetupPath)) { Convert-ToWslPath $Script:NodeSetupPath } else { $Script:NodeSetupUrl }
     $installScript = $installScript.Replace('__HERMES_ARCHIVE__', $Script:HermesArchiveUrl).Replace('__HERMES_ARCHIVE_FALLBACK__', $Script:HermesArchiveFallbackUrl).Replace('__WEBUI_ARCHIVE__', $Script:WebUiArchiveUrl).Replace('__WEBUI_ARCHIVE_FALLBACK__', $Script:WebUiArchiveFallbackUrl).Replace('__NODE_SETUP__', $nodeSetupSource)
-
-    Invoke-WslScript -Content $installScript | Out-Null
+    Write-Step "Install-HermesStack: WSL script prepared, invoking..." "info"
+    $installResult = Invoke-WslScript -Content $installScript
+    Write-Step "Install-HermesStack: WSL script returned exit=$($installResult.ExitCode) lines=$($installResult.Output.Count)" "info"
     Write-Step "Hermes core and hermes-web-ui were installed." "ok"
 }
 
@@ -782,34 +1073,86 @@ function Configure-WindowsIntegration {
     }
 
     $taskName = "HermesAgent-StartWSL"
-    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if (-not $existingTask) {
-        $action = New-ScheduledTaskAction -Execute $Script:WslExe -Argument "-d $Script:WslDistro -u root -- /usr/local/bin/hermes-start $Script:Port"
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-        Write-Step "Startup task was registered." "ok"
-    } else {
-        Write-Step "Startup task already exists." "skip"
+    $action = New-ScheduledTaskAction -Execute $Script:WslExe -Argument "-d $Script:WslDistro -u root -- /usr/local/bin/hermes-start $Script:Port"
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Write-Step "Startup task was registered or updated." "ok"
+}
+
+function Test-WindowsHermesHelperRunning {
+    $escapedDistro = [regex]::Escape($Script:WslDistro)
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -ieq "wsl.exe" -and
+            $_.CommandLine -match $escapedDistro -and
+            $_.CommandLine -match "/usr/local/bin/hermes-start"
+        }
+
+    return [bool]$processes
+}
+
+function Stop-WindowsHermesHelpers {
+    $escapedDistro = [regex]::Escape($Script:WslDistro)
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -ieq "wsl.exe" -and
+            $_.CommandLine -match $escapedDistro -and
+            $_.CommandLine -match "/usr/local/bin/hermes-start"
+        }
+
+    foreach ($process in $processes) {
+        try {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+            Write-Step "Stopped stale Windows WSL foreground helper pid=$($process.ProcessId)." "info"
+        } catch {
+            Write-Step "Could not stop stale WSL helper pid=$($process.ProcessId): $($_.Exception.Message)" "warn"
+        }
     }
+}
+
+function Start-WindowsHermesHelper {
+    if (Test-WindowsHermesHelperRunning) {
+        Write-Step "Windows WSL foreground helper is already running." "skip"
+        return
+    }
+
+    Write-Step "Launching Windows WSL foreground helper to keep Hermes alive..." "info"
+    $args = @("-d", $Script:WslDistro, "-u", "root", "--", "/usr/local/bin/hermes-start", "$Script:Port")
+    Start-Process -FilePath $Script:WslExe -ArgumentList $args -WindowStyle Hidden | Out-Null
 }
 
 function Start-HermesNow {
     Write-Step "Starting Hermes services..." "start"
-    Invoke-WslCommand -Command "hermes-web-ui stop >/dev/null 2>&1 || true; pkill -f 'hermes-start|hermes-web-ui|hermes dashboard|vite --host --port $Script:Port' || true; fuser -k $Script:Port/tcp >/dev/null 2>&1 || true" -IgnoreExitCode | Out-Null
-    Invoke-WslCommand -Command "nohup /usr/local/bin/hermes-start $Script:Port </dev/null >>/var/log/hermes/webui.log 2>&1 &" | Out-Null
 
-    $ready = Wait-HttpReady -Url "http://localhost:$Script:Port"
-    if (-not $ready) {
-        Invoke-WslCommand -Command "tail -n 50 /var/log/hermes-start.log || true; tail -n 50 /var/log/hermes/webui.log || true; tail -n 50 /root/.hermes-web-ui/server.log || true" -IgnoreExitCode | Out-Null
-        throw "Hermes did not become reachable at http://localhost:$Script:Port"
+    $targetUrl = "http://127.0.0.1:$Script:Port"
+    Start-WindowsHermesHelper
+
+    Write-Step "Checking whether Hermes is already reachable before restart..." "info"
+    if (Wait-HttpReady -Url $targetUrl -Attempts 2 -DelaySeconds 1) {
+        Write-Step "Hermes is already reachable at $targetUrl. Skipping restart to avoid interrupting the Web UI." "ok"
+        return
     }
 
-    Write-Step "Hermes is reachable at http://localhost:$Script:Port" "ok"
+    Write-Step "Hermes is not reachable yet. Restarting foreground helper..." "info"
+    Stop-WindowsHermesHelpers
+    Invoke-WslCommand -Command "hermes-web-ui stop >/dev/null 2>&1 || true; pkill -f 'hermes-start|hermes-web-ui|hermes dashboard|dist/server/index|vite --host --port $Script:Port' || true; fuser -k $Script:Port/tcp >/dev/null 2>&1 || true" -IgnoreExitCode | Out-Null
+    Start-Sleep -Seconds 2
+    Start-WindowsHermesHelper
+
+    $ready = Wait-HttpReady -Url $targetUrl
+    if (-not $ready) {
+        Invoke-WslCommand -Command "tail -n 50 /var/log/hermes-start.log || true; tail -n 50 /var/log/hermes/webui.log || true; tail -n 50 /root/.hermes-web-ui/server.log || true" -IgnoreExitCode | Out-Null
+        throw "Hermes did not become reachable at $targetUrl"
+    }
+
+    Write-Step "Hermes is reachable at $targetUrl" "ok"
 }
 
 function Save-State {
+    param([string]$Url)
+
     if (-not (Test-Path $Script:StateDir)) {
         New-Item -ItemType Directory -Path $Script:StateDir -Force | Out-Null
     }
@@ -817,7 +1160,7 @@ function Save-State {
     $state = [PSCustomObject]@{
         distro = $Script:WslDistro
         port   = $Script:Port
-        url    = (Get-WebUiLoginUrl)
+        url    = $Url
         time   = (Get-Date).ToString("s")
     }
     $state | ConvertTo-Json | Set-Content -Path $Script:StateFile -Encoding UTF8
@@ -835,17 +1178,19 @@ function Main {
     Install-StartupFiles
     Configure-WindowsIntegration
     Start-HermesNow
-    Save-State
 
     $loginUrl = Get-WebUiLoginUrl
+    Save-State -Url $loginUrl
     Write-Step "Install completed successfully." "ok"
     Write-Step "Open URL: $loginUrl" "info"
-    Start-Process $loginUrl
+    if (-not $Unattended) {
+        Start-Process $loginUrl
+    }
 
     if (-not $Unattended) {
-        Write-Host ""
-        Write-Host "Open: $loginUrl" -ForegroundColor Cyan
-        Write-Host "Press Enter to exit."
+        Write-ConsoleLine -Text ""
+        Write-ConsoleLine -Text "Open: $loginUrl" -Color Cyan
+        Write-ConsoleLine -Text "Press Enter to exit."
         [void](Read-Host)
     }
 }
@@ -853,17 +1198,19 @@ function Main {
 try {
     Import-ReleaseConfig
     Main
-    Stop-Transcript | Out-Null
 } catch {
     $errMsg = $_.Exception.Message
     $errStack = $_.ScriptStackTrace
-    Write-Host "$(Get-Date -Format 'HH:mm:ss') [ERR] $errMsg" -ForegroundColor Red
-    Write-Host "$errStack" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Install failed. See log: $LogPath" -ForegroundColor Red
-    try { Stop-Transcript | Out-Null } catch {}
+    Append-LogLine -Text "$(Get-Date -Format HH:mm:ss) [ERR] $errMsg"
+    if ($errStack) {
+        Append-LogLine -Text "$errStack"
+    }
+    Write-ConsoleLine -Text "$(Get-Date -Format HH:mm:ss) [ERR] $errMsg" -Color Red
+    Write-ConsoleLine -Text "$errStack" -Color Red
+    Write-ConsoleLine -Text ""
+    Write-ConsoleLine -Text "Install failed. See log: $LogPath" -Color Red
     if (-not $Unattended) {
-        Read-Host "按 Enter 键退出（日志已保存至 $LogPath）"
+        Read-Host "Press Enter to exit. Log saved to $LogPath"
     }
     exit 1
 }

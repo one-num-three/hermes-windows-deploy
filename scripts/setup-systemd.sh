@@ -74,6 +74,33 @@ if ! command -v hermes-web-ui >/dev/null 2>&1; then
     echo "hermes-web-ui command not found" >>"$LOG_FILE"
     exit 1
 fi
+if [ ! -f /opt/hermes/hermes-web-ui/dist/server/index.js ]; then
+    echo "hermes-web-ui server entry not found" >>"$LOG_FILE"
+    exit 1
+fi
+
+INDEX_FILE="/opt/hermes/hermes-web-ui/dist/client/index.html"
+if [ -f "$INDEX_FILE" ] && ! grep -q "hermes-installer-locale-default" "$INDEX_FILE"; then
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/hermes/hermes-web-ui/dist/client/index.html")
+text = path.read_text(encoding="utf-8")
+snippet = """  <script id="hermes-installer-locale-default">
+    try {
+      var hashQuery = (location.hash.split("?")[1] || "");
+      var params = new URLSearchParams(hashQuery);
+      if (params.get("lang") === "zh" || !localStorage.getItem("hermes_locale")) {
+        localStorage.setItem("hermes_locale", "zh");
+      }
+    } catch (e) {}
+  </script>
+"""
+if "hermes-installer-locale-default" not in text:
+    text = text.replace("</head>", snippet + "</head>")
+    path.write_text(text, encoding="utf-8")
+PY
+fi
 
 if [ ! -f "$TOKEN_FILE" ] || ! tr -d '\r\n' < "$TOKEN_FILE" | grep -Eq '^[0-9a-f]{64}$'; then
   python3 - <<'PY' > "$TOKEN_FILE"
@@ -84,7 +111,11 @@ PY
 fi
 
 export AUTH_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
-hermes-web-ui start "$PORT" >>"$LOG_FILE" 2>&1
+export PORT="$PORT"
+hermes-web-ui stop >>"$LOG_FILE" 2>&1 || true
+fuser -k "$PORT/tcp" >>"$LOG_FILE" 2>&1 || true
+chmod +x /opt/hermes/hermes-web-ui/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
+exec node /opt/hermes/hermes-web-ui/dist/server/index.js >>"$LOG_FILE" 2>&1
 EOF
 chmod +x "$START_SCRIPT"
 
@@ -95,28 +126,24 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 WorkingDirectory=/opt/hermes/hermes-web-ui
 ExecStart=$START_SCRIPT $PORT
-ExecStop=/bin/bash -lc 'hermes-web-ui stop'
-RemainAfterExit=yes
 Environment=HOME=/root
 Environment=HERMES_HOME=/root/.hermes
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=3
+KillMode=control-group
 
 [Install]
 WantedBy=default.target
 EOF
 
 systemctl daemon-reload
-systemctl enable hermes || true
-systemctl start hermes || {
-    echo "Failed to start hermes service"
-    journalctl -u hermes --no-pager -n 20
-    exit 0
-}
+systemctl disable --now hermes || true
 
-echo "Hermes service is enabled and start command has been issued"
-systemctl status hermes --no-pager || true
+echo "Hermes systemd service file is installed but disabled."
+echo "Windows uses the HermesAgent-StartWSL scheduled task as the foreground keep-alive process."
 exit 0

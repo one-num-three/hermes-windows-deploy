@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HermesInstaller</AssemblyName>
     <RootNamespace>HermesInstaller</RootNamespace>
-    <Version>0.2.2</Version>
+    <Version>0.2.9</Version>
     <Authors>Hermes Community</Authors>
     <Description>Hermes Agent Windows installer launcher</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>

@@ -1,18 +1,18 @@
-{
-    "mode":  "offline",
+﻿{
+    "mode":  "cdn",
     "cdnBase":  "http://121.40.165.216/hermes-cdn/files",
     "distro":  "Ubuntu-24.04",
     "port":  8648,
     "cache":  {
-                  "hermesArchive":  "scripts/_cache/hermes-agent.tar.gz",
-                  "webUiArchive":  "scripts/_cache/hermes-web-ui.tgz",
-                  "wslMsi":  "scripts/_cache/wsl.2.6.3.0.x64.msi",
-                  "wslKernelMsi":  "scripts/_cache/wsl_update_x64.msi",
-                  "ubuntuImage":  "scripts/_cache/ubuntu-noble-wsl-amd64.wsl",
-                  "nodeSetup":  "scripts/_cache/setup-node23.x"
+                  "hermesArchive":  "",
+                  "webUiArchive":  "",
+                  "wslMsi":  "",
+                  "wslKernelMsi":  "",
+                  "ubuntuImage":  "",
+                  "nodeSetup":  ""
               },
     "notes":  [
-                  "Offline release bundle for Windows 10/11 simulator testing.",
-                  "Installer prefers local cache first and only falls back to network when a local asset is missing."
+                  "CDN release bundle for Windows 10/11 installer distribution.",
+                  "Installer fetches runtime assets from the configured CDN base."
               ]
 }

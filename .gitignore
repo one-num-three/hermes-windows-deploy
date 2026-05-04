@@ -18,6 +18,7 @@ bin/
 obj/
 release/
 HermesInstaller.exe
+HermesInstaller-v*.exe
 ui-temp/
 *.log
 
